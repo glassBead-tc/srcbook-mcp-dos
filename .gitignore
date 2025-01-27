@@ -43,3 +43,6 @@ srcbook/lib/**/*
 *.code-workspace
 
 vite.config.ts.timestamp-*.mjs
+
+# MCP config
+packages/api/srcbook_mcp_config.json
