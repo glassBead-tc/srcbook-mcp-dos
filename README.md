@@ -140,3 +140,4 @@ If you want to disable tracking, you can run Srcbook with `SRCBOOK_DISABLE_ANALY
 ## Contributing
 
 For development instructions, see [CONTRIBUTING.md](https://github.com/srcbookdev/srcbook/blob/main/CONTRIBUTING.md).
+# srcbook-mcp-dos
