@@ -293,4 +293,4 @@ export async function streamEditApp(
   });
 
   return result.textStream;
-}
+} 

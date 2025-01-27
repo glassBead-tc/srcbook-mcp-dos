@@ -13,6 +13,7 @@ import express from 'express';
 // @ts-ignore
 import { WebSocketServer as WsWebSocketServer } from 'ws';
 import { wss, app, posthog } from '@srcbook/api';
+import mcpHubInstance from '../../packages/api/mcp/mcphub.mjs';
 import chalk from 'chalk';
 import { pathTo, getPackageJson } from './utils.mjs';
 
@@ -34,6 +35,19 @@ const INDEX_HTML = pathTo('public', 'index.html');
 // Serve the static files, compiled from the packages/web/ React app
 console.log(chalk.dim('Serving static files (React app)...'));
 app.use(express.static(PUBLIC_DIR));
+function logServerConnections() {
+  const connections = mcpHubInstance.listConnections();
+  console.log('--- Current MCP Server Connections ---');
+  connections.forEach(conn => {
+    console.log(`Server: ${conn.name}`);
+    console.log(`  Status: ${conn.status}`);
+    console.log(`  Capabilities: ${JSON.stringify(conn.capabilities, null, 2)}`);
+    if (conn.error) {
+      console.log(`  Error: ${conn.error}`);
+    }
+    console.log('---------------------------------------');
+  });
+}
 const server = http.createServer(app);
 
 // Create the WebSocket server
@@ -48,6 +62,26 @@ console.log(chalk.green('Initialization complete'));
 
 const port = Number(process.env.PORT ?? 2150);
 const url = `http://localhost:${port}`;
+
+// Initialize MCPHub and start servers
+(async () => {
+  try {
+    // Initialize MCPHub (establish connections to MCP servers)
+    await mcpHubInstance.initialize();
+    console.log('MCPHub initialized successfully.');
+
+    // Log current server connections and capabilities
+    logServerConnections();
+
+    // Start the HTTP server
+    app.listen(port, () => {
+      console.log(`HTTP server is running on port ${port}`);
+    });
+  } catch (error) {
+    console.error('Failed to initialize MCPHub:', error);
+    process.exit(1); // Exit the application if MCPHub fails to initialize
+  }
+})();
 
 posthog.capture({ event: 'user started Srcbook application' });
 

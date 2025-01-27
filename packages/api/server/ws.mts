@@ -64,10 +64,16 @@ import { filenameFromPath, pathToCodeFile } from '../srcbook/path.mjs';
 import { normalizeDiagnostic } from '../tsserver/utils.mjs';
 import { removeCodeCellFromDisk } from '../srcbook/index.mjs';
 import { register as registerAppChannel } from './channels/app.mjs';
+import { register as registerServersChannel } from '../mcp/channels/servers.mjs';
+import { register as registerToolsChannel } from '../mcp/channels/tools.mjs';
+import mcpHubInstance from '../mcp/mcphub.mjs';
 
 type SessionsContextType = MessageContextType<'sessionId'>;
 
 const wss = new WebSocketServer();
+
+registerServersChannel(wss, mcpHubInstance);
+registerToolsChannel(wss, mcpHubInstance);
 
 function addRunningProcess(
   session: SessionType,
