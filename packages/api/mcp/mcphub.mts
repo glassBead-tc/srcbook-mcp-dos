@@ -65,6 +65,11 @@ class MCPHub {
     return MCPHub.instance;
   }
 
+  // ✅ Add getter for isInitialized (post-video)
+  public get isInitialized(): boolean {
+    return this.initialized;
+  }
+
   /**
    * Initialize the MCPHub and connect to all configured servers.
    * Should be called once during application startup.

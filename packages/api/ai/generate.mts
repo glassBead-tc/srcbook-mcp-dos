@@ -14,6 +14,10 @@ import { PROMPTS_DIR } from '../constants.mjs';
 import { encode, decodeCells } from '../srcmd.mjs';
 import { buildProjectXml, type FileContent } from '../ai/app-parser.mjs';
 import { logAppGeneration } from './logger.mjs';
+import mcpHubInstance from '../mcp/mcphub.mjs';
+import { SYSTEM_PROMPT } from "../prompts/system-scratch.mjs";
+
+console.log('MCPHub instance:', mcpHubInstance);
 
 const makeGenerateSrcbookSystemPrompt = () => {
   return readFileSync(Path.join(PROMPTS_DIR, 'srcbook-generator.txt'), 'utf-8');
@@ -243,18 +247,58 @@ export async function fixDiagnostics(
   return result.text;
 }
 
+/**
+ * High-level function demonstrating how to:
+ * 1. Build a dynamic system prompt that includes list of connected servers/tools
+ * 2. Call LLM with that system prompt + userPrompt
+ * 3. Parse the returned text for tool usage tags
+ * 4. Call the requested MCP tools
+ */
 export async function generateApp(
   projectId: string,
   files: FileContent[],
   query: string,
 ): Promise<string> {
+  while (!mcpHubInstance.isInitialized) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+
+  const systemPrompt = await SYSTEM_PROMPT(mcpHubInstance);
+  console.log('System prompt generated successfully');
+  
   const model = await getModel();
-  const result = await generateText({
+  const llmResult = await generateText({
     model,
-    system: makeAppBuilderSystemPrompt(),
+    system: systemPrompt,
     prompt: makeAppCreateUserPrompt(projectId, files, query),
   });
-  return result.text;
+
+  // Strip any content before the first <plan> tag
+  const planStart = llmResult.text.indexOf('<plan>');
+  if (planStart === -1) {
+    console.error('Raw LLM response:', llmResult.text);
+    throw new Error('LLM response does not contain a <plan> tag');
+  }
+  const cleanedResponse = llmResult.text.slice(planStart);
+
+  const toolUsages = parseOutToolTags(cleanedResponse);
+  
+  for (const usage of toolUsages) {
+    const { server_name, tool_name, arguments: toolArgs } = usage;
+    try {
+      const toolResult = await mcpHubInstance.callTool(
+        server_name!,
+        tool_name!,
+        toolArgs,
+      );
+      console.log(`Tool result [${server_name}/${tool_name}]:`, toolResult);
+    } catch (error) {
+      console.error(`Tool error [${server_name}/${tool_name}]:`, error);
+      // Don't throw, just continue with other operations
+    }
+  }
+
+  return cleanedResponse;
 }
 
 export async function streamEditApp(
@@ -294,3 +338,42 @@ export async function streamEditApp(
 
   return result.textStream;
 } 
+
+/**
+ * Example utility function to extract <use_mcp_tool> declarations from the LLM's response text.
+ * This is very flexible; you might choose a more robust XML parser if needed.
+ */
+function parseOutToolTags(llmOutput: string) {
+  // Simple regex to capture everything inside <use_mcp_tool> ... </use_mcp_tool>
+  const toolUsageRegex = /<use_mcp_tool>[\s\S]*?<\/use_mcp_tool>/g;
+  const matches = llmOutput.match(toolUsageRegex) || [];
+
+  return matches.map((block) => {
+    // Extract server_name, tool_name, and JSON arguments
+    const serverNameMatch = block.match(/<server_name>([\s\S]*?)<\/server_name>/);
+    const toolNameMatch = block.match(/<tool_name>([\s\S]*?)<\/tool_name>/);
+    const argumentsMatch = block.match(/<arguments>([\s\S]*?)<\/arguments>/);
+
+    const server_name = serverNameMatch ? serverNameMatch[1]?.trim() : "";
+    const tool_name = toolNameMatch ? toolNameMatch[1]?.trim() : "";
+
+    let parsedArgs: Record<string, unknown> = {};
+    if (argumentsMatch) {
+      const rawArgs = argumentsMatch[1]?.trim();
+
+      // Attempt to parse the JSON in the <arguments> block
+      try {
+        parsedArgs = JSON.parse(rawArgs!);
+      } catch (err) {
+        console.warn("Failed to parse arguments from <use_mcp_tool>", err);
+        // fallback to an empty object so we don't break everything
+      }
+    }
+
+    return {
+      server_name,
+      tool_name,
+      arguments: parsedArgs,
+    };
+  });
+}
