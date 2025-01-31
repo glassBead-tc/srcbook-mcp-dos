@@ -17,6 +17,7 @@ import { logAppGeneration } from './logger.mjs';
 import mcpHubInstance from '../mcp/mcphub.mjs';
 import { SYSTEM_PROMPT } from "../prompts/system-scratch.mjs";
 import { McpToolCallResponse } from '../mcp/types/index.mjs';
+import { ToolExecutor } from './tool-executor.mjs';
 
 console.log('MCPHub instance:', mcpHubInstance);
 
@@ -31,12 +32,12 @@ const makeGenerateCellSystemPrompt = (language: CodeLanguageType) => {
 const makeFixDiagnosticsSystemPrompt = () => {
   return readFileSync(Path.join(PROMPTS_DIR, 'fix-cell-diagnostics.txt'), 'utf-8');
 };
-const makeAppBuilderSystemPrompt = () => {
-  return readFileSync(Path.join(PROMPTS_DIR, 'app-builder.txt'), 'utf-8');
-};
-const makeAppEditorSystemPrompt = () => {
-  return readFileSync(Path.join(PROMPTS_DIR, 'app-editor.txt'), 'utf-8');
-};
+// const makeAppBuilderSystemPrompt = () => {
+//   return readFileSync(Path.join(PROMPTS_DIR, 'app-builder.txt'), 'utf-8');
+// };
+// const makeAppEditorSystemPrompt = () => {
+//   return readFileSync(Path.join(PROMPTS_DIR, 'app-editor.txt'), 'utf-8');
+// };
 
 const makeAppEditorUserPrompt = (projectId: string, files: FileContent[], query: string) => {
   const projectXml = buildProjectXml(files, projectId);
@@ -249,52 +250,6 @@ export async function fixDiagnostics(
 }
 
 /**
- * Handles GitHub repository creation and code pushing
- */
-async function handleGitHubOperations(
-  toolResult: any,
-  files: FileContent[],
-): Promise<void> {
-  if (!toolResult.content?.[0]?.text) {
-    throw new Error('Invalid repository creation response format');
-  }
-
-  const repoJsonString = toolResult.content[0].text;    
-  let parsedRepo;
-  try {
-    parsedRepo = JSON.parse(repoJsonString);
-    if (!parsedRepo.owner?.login || !parsedRepo.name) {
-      throw new Error('Repository response missing required fields');
-    }
-  } catch (err: any) {
-    throw new Error(`Could not parse create_repository tool response as JSON: ${err.message}`);
-  }
-
-  console.log("Repository created, automatically adding push operation");
-  
-  const pushResult = await mcpHubInstance.callTool("github", "push_files", {
-    owner: parsedRepo.owner.login,
-    repo: parsedRepo.name,
-    branch: "main",
-    files: files.map(file => ({
-      path: file.filename,
-      content: file.content
-    })),
-    message: "Initial commit: Add portfolio website code"
-  });
-  console.log('Push result:', pushResult);
-  
-  const verificationResult = await verifyToolSuccess(pushResult, {
-    server_name: 'github',
-    tool_name: 'push_files'
-  });
-  
-  if (!verificationResult.success) {
-    throw new Error(`Failed to push files: ${verificationResult.message}`);
-  }
-}
-
-/**
  * High-level function demonstrating how to:
  * 1. Build a dynamic system prompt that includes list of connected servers/tools
  * 2. Call LLM with that system prompt + userPrompt
@@ -306,9 +261,7 @@ export async function generateApp(
   files: FileContent[],
   query: string,
 ): Promise<string> {
-  while (!mcpHubInstance.isInitialized) {
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
+  await waitForMcpInit();
 
   const systemPrompt = await SYSTEM_PROMPT(mcpHubInstance);
   console.log('System prompt generated successfully');
@@ -339,6 +292,93 @@ export async function generateApp(
   // Log the parsed tool usages
   console.log('Parsed tool usages:', JSON.stringify(toolUsages, null, 2));
 
+  await executeToolCalls(toolUsages);
+
+  return cleanedResponse;
+}
+
+export async function streamEditApp(
+  projectId: string,
+  files: FileContent[],
+  query: string,
+  appId: string,
+  planId: string,
+) {
+  await waitForMcpInit();
+
+  const model = await getModel();
+  const systemPrompt = await SYSTEM_PROMPT(mcpHubInstance);
+  const userPrompt = makeAppEditorUserPrompt(projectId, files, query);
+
+  let response = '';
+  let toolUsages: Array<{
+    server_name: string | undefined;
+    tool_name: string | undefined;
+    arguments: Record<string, unknown>;
+  }> = [];
+
+  const result = await streamText({
+    model,
+    system: systemPrompt,
+    prompt: userPrompt,
+    onChunk: (chunk) => {
+      if (chunk.chunk.type === 'text-delta') {
+        response += chunk.chunk.textDelta;
+        
+        // Try to parse tool usages as they come in
+        try {
+          const planStart = response.indexOf('<plan>');
+          if (planStart !== -1) {
+            const cleanedResponse = response.slice(planStart);
+            toolUsages = parseOutToolTags(cleanedResponse);
+          }
+        } catch (error) {
+          // Ignore parsing errors during streaming as the XML might be incomplete
+          console.debug('Parsing error during streaming:', error);
+        }
+      }
+    },
+    onFinish: async () => {
+      if (process.env.SRCBOOK_DISABLE_ANALYTICS !== 'true') {
+        logAppGeneration({
+          appId,
+          planId,
+          llm_request: { model, system: systemPrompt, prompt: userPrompt },
+          llm_response: response,
+        });
+      }
+
+      // Process tool calls after streaming is complete
+      await executeToolCalls(toolUsages);
+    },
+  });
+
+  return result.textStream;
+} 
+
+/**
+ * Helper function to wait for MCP initialization
+ */
+async function waitForMcpInit() {
+  while (!mcpHubInstance.isInitialized) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+}
+
+const toolExecutor = new ToolExecutor(mcpHubInstance, {
+  github: {
+    push_files: ['owner', 'branch'],
+    create_repository: ['name', 'description'],
+  }
+});
+
+async function executeToolCalls(
+  toolUsages: Array<{
+    server_name: string | undefined;
+    tool_name: string | undefined;
+    arguments: Record<string, unknown>;
+  }>,
+): Promise<any> {
   let lastToolResult: any;
   
   for (const [index, usage] of toolUsages.entries()) {
@@ -346,26 +386,30 @@ export async function generateApp(
     console.log(`Executing step ${index + 1}/${toolUsages.length}: ${server_name}/${tool_name}`);
 
     try {
-      lastToolResult = await mcpHubInstance.callTool(
-        server_name!,
-        tool_name!,
-        {
-          ...toolArgs,
-          ...(index > 0 && toolArgs.requiresPreviousResult ? { previousResult: lastToolResult } : {})
-        }
-      );
-      
-      console.log(`Tool result [${server_name}/${tool_name}]:`, lastToolResult);
+      const finalArgs = {
+        ...toolArgs,
+        ...(index > 0 && toolArgs.requiresPreviousResult ? { previousResult: lastToolResult } : {})
+      };
 
-      const verificationResult = await verifyToolSuccess(lastToolResult, { 
-        server_name: server_name!, 
-        tool_name: tool_name! 
+      const result = await toolExecutor.executeTool({
+        serverName: server_name!,
+        toolName: tool_name!,
+        arguments: finalArgs
       });
-      
-      if (!verificationResult.success) {
-        console.error(`Step ${index + 1} failed: ${verificationResult.message}`);
-        throw new Error(`Tool verification failed: ${verificationResult.message}`);
+
+      if (!result.success) {
+        // If execution failed due to missing fields, throw a specific error
+        if (result.missingFields?.length) {
+          throw new Error(
+            `Tool execution failed: Missing required fields for ${server_name}/${tool_name}: ${result.missingFields.join(', ')}`
+          );
+        }
+        // Otherwise throw the general error
+        throw new Error(result.error);
       }
+
+      lastToolResult = result.data;
+      console.log(`Tool result [${server_name}/${tool_name}]:`, lastToolResult);
 
       // Add delay between steps if needed
       if (index < toolUsages.length - 1) {
@@ -377,7 +421,7 @@ export async function generateApp(
     }
   }
 
-  return cleanedResponse;
+  return lastToolResult;
 }
 
 /**
@@ -405,44 +449,6 @@ async function verifyToolSuccess(
 
   return { success, message };
 }
-
-export async function streamEditApp(
-  projectId: string,
-  files: FileContent[],
-  query: string,
-  appId: string,
-  planId: string,
-) {
-  const model = await getModel();
-
-  const systemPrompt = makeAppEditorSystemPrompt();
-  const userPrompt = makeAppEditorUserPrompt(projectId, files, query);
-
-  let response = '';
-
-  const result = await streamText({
-    model,
-    system: systemPrompt,
-    prompt: userPrompt,
-    onChunk: (chunk) => {
-      if (chunk.chunk.type === 'text-delta') {
-        response += chunk.chunk.textDelta;
-      }
-    },
-    onFinish: () => {
-      if (process.env.SRCBOOK_DISABLE_ANALYTICS !== 'true') {
-        logAppGeneration({
-          appId,
-          planId,
-          llm_request: { model, system: systemPrompt, prompt: userPrompt },
-          llm_response: response,
-        });
-      }
-    },
-  });
-
-  return result.textStream;
-} 
 
 /**
  * Example utility function to extract <use_mcp_tool> declarations from the LLM's response text.

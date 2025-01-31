@@ -1,6 +1,16 @@
 import { z } from 'zod';
 
 // Core MCP Schemas
+export interface McpTool {
+  name: string;
+  description?: string;
+  inputSchema: {
+    type: 'object';
+    properties: Record<string, { type: string; description?: string }>;
+    required?: string[];
+  };
+}
+
 export const McpToolSchema = z.object({
   name: z.string(),
   description: z.string().optional(),
@@ -9,10 +19,19 @@ export const McpToolSchema = z.object({
     properties: z.record(z.object({
       type: z.string(),
       description: z.string().optional()
-    })),
+    })).optional().transform(val => val ?? {}),
     required: z.array(z.string()).optional()
   })
-});
+}).transform((val): McpTool => ({
+  ...val,
+  inputSchema: {
+    ...val.inputSchema,
+    properties: val.inputSchema.properties ?? {}
+  }
+}));
+
+type InferredMcpTool = z.infer<typeof McpToolSchema>;
+type _typeCheck = InferredMcpTool extends McpTool ? true : false;
 
 export const McpResourceSchema = z.object({
   uri: z.string(),
@@ -93,7 +112,6 @@ export const McpToolCallResponseSchema = z.object({
 });
 
 // Export TypeScript types
-export type McpTool = z.infer<typeof McpToolSchema>;
 export type McpResource = z.infer<typeof McpResourceSchema>;
 export type McpResourceTemplate = z.infer<typeof McpResourceTemplateSchema>;
 export type McpServerConfig = z.infer<typeof McpServerConfigSchema>;
@@ -117,3 +135,21 @@ export const McpToolResultPayloadSchema = z.object({
 export type McpServerConnectionPayload = z.infer<typeof McpServerConnectionPayloadSchema>;
 export type McpServerStatusUpdatePayload = z.infer<typeof McpServerStatusUpdatePayloadSchema>;
 export type McpToolResultPayload = z.infer<typeof McpToolResultPayloadSchema>;
+
+export interface LLMPromptContext {
+  serverName: string;
+  toolName: string;
+  missingFields: Array<{
+    name: string;
+    type: string;
+    description?: string;
+  }>;
+  currentArgs: Record<string, any>;
+  attemptCount: number;
+}
+
+export interface LLMPromptResult {
+  providedValues: Record<string, any>;
+  shouldPromptUser: boolean;
+  userPrompt?: string;
+}

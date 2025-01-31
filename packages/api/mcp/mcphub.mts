@@ -4,7 +4,7 @@ import {
   ListToolsResultSchema,
   ListResourcesResultSchema,
   ListResourceTemplatesResultSchema,
-  InitializeResultSchema, // ✅ Ensure this is correctly imported
+  InitializeResultSchema, // Ensure this is correctly imported
 } from '@modelcontextprotocol/sdk/types.js';
 import { loadMcpConfig } from './config.mjs';
 import { z } from 'zod';
@@ -45,6 +45,13 @@ interface ServerCapabilities {
   // Add other capabilities as needed
 }
 
+interface Tool {
+  name: string;
+  description?: string;
+  inputSchema: any;
+  serverName: string;
+}
+
 export class MCPHub {
   private static instance: MCPHub;
   private connections: Map<string, McpConnection> = new Map();
@@ -63,6 +70,8 @@ export class MCPHub {
 
   private initialized = false;
   private config!: McpConfig;
+  private allTools: Map<string, Tool[]> = new Map();
+  private toolsInitialized = false;
 
   private constructor() {
     console.log('Creating new MCPHub instance.');
@@ -77,7 +86,7 @@ export class MCPHub {
     return MCPHub.instance;
   }
 
-  // ✅ Add getter for isInitialized (post-video)
+  // Add getter for isInitialized (post-video)
   public get isInitialized(): boolean {
     return this.initialized;
   }
@@ -370,6 +379,10 @@ export class MCPHub {
     toolId: string,
     params: Record<string, any>
   ): Promise<any> {
+    console.log(`[MCP Hub] Executing tool on server ${serverName}:`);
+    console.log(`[MCP Hub] - Tool ID: ${toolId}`);
+    console.log(`[MCP Hub] - Parameters:`, JSON.stringify(params, null, 2));
+    
     return this.enqueueToolCall(serverName, toolId, params);
   }
 
@@ -536,7 +549,43 @@ export class MCPHub {
       listener(name, status);
     }
   }
+
+  private async initializeTools(): Promise<void> {
+    if (this.toolsInitialized) return;
+
+    const connections = await this.listConnections();
+    for (const server of connections) {
+      if (server.capabilities.tools) {
+        try {
+          const tools = await this.listTools(server.name);
+          const toolsWithServer = tools.map(tool => ({
+            ...tool,
+            serverName: server.name
+          }));
+          this.allTools.set(server.name, toolsWithServer);
+        } catch (error) {
+          console.error(`Failed to initialize tools for server ${server.name}:`, error);
+          this.allTools.set(server.name, []);
+        }
+      }
+    }
+
+    this.toolsInitialized = true;
+  }
+
+  public getAllTools(): Tool[] {
+    return Array.from(this.allTools.values()).flat();
+  }
+
+  public getToolsByServer(serverName: string): Tool[] {
+    return this.allTools.get(serverName) || [];
+  }
+
+  public findTool(serverName: string, toolName: string): Tool | undefined {
+    const serverTools = this.allTools.get(serverName);
+    return serverTools?.find(tool => tool.name === toolName);
+  }
 }
 
-const mcpHubInstance = MCPHub.getInstance(); // ✅ Use getInstance
+const mcpHubInstance = MCPHub.getInstance(); // Use getInstance
 export default mcpHubInstance;

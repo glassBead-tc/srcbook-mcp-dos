@@ -9,7 +9,8 @@
     "SRCBOOK_DISABLE_ANALYTICS",
     "PORT",
     "HOME",
-    "CONTAINER"
+    "CONTAINER",
+    "GITHUB_DEFAULT_OWNER"
   ],
   "tasks": {
     "//#format": {},
