@@ -1,12 +1,27 @@
 import { z } from 'zod';
 
 // Core MCP Schemas
+export type DangerLevel = 'none' | 'low' | 'medium' | 'high';
+
+export interface ToolSafetyMetadata {
+  isDangerous?: boolean;
+  dangerLevel?: DangerLevel;
+  dangerDescription?: string;
+  requiresConfirmation?: boolean;
+  confirmationMessage?: string;
+}
+
 export interface McpTool {
   name: string;
   description?: string;
+  safety?: ToolSafetyMetadata;
   inputSchema: {
     type: 'object';
-    properties: Record<string, { type: string; description?: string }>;
+    properties: Record<string, { 
+      type: string; 
+      description?: string;
+      enum?: any[];
+    }>;
     required?: string[];
   };
 }
@@ -14,11 +29,19 @@ export interface McpTool {
 export const McpToolSchema = z.object({
   name: z.string(),
   description: z.string().optional(),
+  safety: z.object({
+    isDangerous: z.boolean().optional(),
+    dangerLevel: z.enum(['none', 'low', 'medium', 'high']).optional(),
+    dangerDescription: z.string().optional(),
+    requiresConfirmation: z.boolean().optional(),
+    confirmationMessage: z.string().optional()
+  }).optional(),
   inputSchema: z.object({
     type: z.literal('object'),
     properties: z.record(z.object({
       type: z.string(),
-      description: z.string().optional()
+      description: z.string().optional(),
+      enum: z.array(z.any()).optional()
     })).optional().transform(val => val ?? {}),
     required: z.array(z.string()).optional()
   })
@@ -32,6 +55,11 @@ export const McpToolSchema = z.object({
 
 type InferredMcpTool = z.infer<typeof McpToolSchema>;
 type _typeCheck = InferredMcpTool extends McpTool ? true : false;
+
+// Server Context Types
+export * from './servers/context.mjs';
+export * from './servers/filesystem.mjs';
+export * from './servers/github.mjs';
 
 export const McpResourceSchema = z.object({
   uri: z.string(),
