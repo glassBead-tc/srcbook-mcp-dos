@@ -1,7 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import {
-  CallToolResultSchema,
   ListToolsResultSchema,
   ListResourcesResultSchema,
   ListResourceTemplatesResultSchema,
@@ -33,6 +32,10 @@ interface McpConnection {
   status: 'connected' | 'connecting' | 'disconnected';
   capabilities: ServerCapabilities;
   error?: string;
+  activeToolCall?: {
+    toolId: string;
+    startTime: number;
+  };
 }
 
 interface ServerCapabilities {
@@ -42,15 +45,24 @@ interface ServerCapabilities {
   // Add other capabilities as needed
 }
 
-class MCPHub {
-  private connections = new Map<string, McpConnection>();
-  private statusListeners: Array<
-    (name: string, status: Omit<McpConnection, 'client' | 'transport'>) => void
-  > = [];
+export class MCPHub {
+  private static instance: MCPHub;
+  private connections: Map<string, McpConnection> = new Map();
+  private statusListeners: ((name: string, status: Omit<McpConnection, 'client' | 'transport'>) => void)[] = [];
+  // private toolResultListeners: ((name: string, toolId: string, result: any) => void)[] = [];
+
+  /**
+   * Queue for managing sequential tool calls
+   */
+  private toolCallQueue: Map<string, Array<{
+    toolId: string;
+    params: Record<string, any>;
+    resolve: (value: any) => void;
+    reject: (error: Error) => void;
+  }>> = new Map();
+
   private initialized = false;
   private config!: McpConfig;
-
-  private static instance: MCPHub;
 
   private constructor() {
     console.log('Creating new MCPHub instance.');
@@ -298,21 +310,67 @@ class MCPHub {
   }
 
   /**
-   * Call a tool on a connected server.
+   * Enqueues a tool call and processes it when previous calls are complete
+   */
+  private async enqueueToolCall(
+    serverName: string, 
+    toolId: string, 
+    params: Record<string, any>
+  ): Promise<any> {
+    return new Promise((resolve, reject) => {
+      const queue = this.toolCallQueue.get(serverName) || [];
+      queue.push({ toolId, params, resolve, reject });
+      this.toolCallQueue.set(serverName, queue);
+
+      // If this is the only item in the queue, process it immediately
+      if (queue.length === 1) {
+        this.processNextToolCall(serverName);
+      }
+    });
+  }
+
+  /**
+   * Processes the next tool call in queue
+   */
+  private async processNextToolCall(serverName: string): Promise<void> {
+    const queue = this.toolCallQueue.get(serverName) || [];
+    const currentCall = queue[0];
+    if (!currentCall) return;
+
+    const conn = this.connections.get(serverName);
+    if (!conn) {
+      currentCall.reject(new Error(`No connection found for server: ${serverName}`));
+      return;
+    }
+
+    try {
+      const result = await conn.client.callTool({
+        name: currentCall.toolId,
+        arguments: currentCall.params,
+      });
+      currentCall.resolve(result);
+    } catch (error) {
+      currentCall.reject(error as Error);
+    } finally {
+      // Remove processed call and start next one
+      queue.shift();
+      this.toolCallQueue.set(serverName, queue);
+      
+      if (queue.length > 0) {
+        await this.processNextToolCall(serverName);
+      }
+    }
+  }
+
+  /**
+   * Call a tool with parameters
    */
   async callTool(
     serverName: string,
-    toolName: string,
-    params: any,
-  ): Promise<z.infer<typeof CallToolResultSchema>> {
-    const conn = this.connections.get(serverName);
-    if (!conn || conn.status !== 'connected') {
-      throw new Error(`Server ${serverName} not connected`);
-    }
-    return conn.client.request(
-      { method: 'tools/call', params: { name: toolName, arguments: params } },
-      CallToolResultSchema,
-    );
+    toolId: string,
+    params: Record<string, any>
+  ): Promise<any> {
+    return this.enqueueToolCall(serverName, toolId, params);
   }
 
   /**

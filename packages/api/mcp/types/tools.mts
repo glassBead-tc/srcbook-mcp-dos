@@ -14,3 +14,4 @@ export const MCPToolExecutionSchema = z.object({
 
 // Type inference for TypeScript
 export type MCPToolExecution = z.infer<typeof MCPToolExecutionSchema>;
+

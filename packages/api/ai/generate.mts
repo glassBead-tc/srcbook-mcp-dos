@@ -16,6 +16,7 @@ import { buildProjectXml, type FileContent } from '../ai/app-parser.mjs';
 import { logAppGeneration } from './logger.mjs';
 import mcpHubInstance from '../mcp/mcphub.mjs';
 import { SYSTEM_PROMPT } from "../prompts/system-scratch.mjs";
+import { McpToolCallResponse } from '../mcp/types/index.mjs';
 
 console.log('MCPHub instance:', mcpHubInstance);
 
@@ -248,6 +249,52 @@ export async function fixDiagnostics(
 }
 
 /**
+ * Handles GitHub repository creation and code pushing
+ */
+async function handleGitHubOperations(
+  toolResult: any,
+  files: FileContent[],
+): Promise<void> {
+  if (!toolResult.content?.[0]?.text) {
+    throw new Error('Invalid repository creation response format');
+  }
+
+  const repoJsonString = toolResult.content[0].text;    
+  let parsedRepo;
+  try {
+    parsedRepo = JSON.parse(repoJsonString);
+    if (!parsedRepo.owner?.login || !parsedRepo.name) {
+      throw new Error('Repository response missing required fields');
+    }
+  } catch (err: any) {
+    throw new Error(`Could not parse create_repository tool response as JSON: ${err.message}`);
+  }
+
+  console.log("Repository created, automatically adding push operation");
+  
+  const pushResult = await mcpHubInstance.callTool("github", "push_files", {
+    owner: parsedRepo.owner.login,
+    repo: parsedRepo.name,
+    branch: "main",
+    files: files.map(file => ({
+      path: file.filename,
+      content: file.content
+    })),
+    message: "Initial commit: Add portfolio website code"
+  });
+  console.log('Push result:', pushResult);
+  
+  const verificationResult = await verifyToolSuccess(pushResult, {
+    server_name: 'github',
+    tool_name: 'push_files'
+  });
+  
+  if (!verificationResult.success) {
+    throw new Error(`Failed to push files: ${verificationResult.message}`);
+  }
+}
+
+/**
  * High-level function demonstrating how to:
  * 1. Build a dynamic system prompt that includes list of connected servers/tools
  * 2. Call LLM with that system prompt + userPrompt
@@ -273,6 +320,9 @@ export async function generateApp(
     prompt: makeAppCreateUserPrompt(projectId, files, query),
   });
 
+  // Add detailed logging of the LLM response
+  console.log('Raw LLM response:', llmResult.text);
+
   // Strip any content before the first <plan> tag
   const planStart = llmResult.text.indexOf('<plan>');
   if (planStart === -1) {
@@ -280,25 +330,80 @@ export async function generateApp(
     throw new Error('LLM response does not contain a <plan> tag');
   }
   const cleanedResponse = llmResult.text.slice(planStart);
+  
+  // Log the cleaned response before parsing
+  console.log('Cleaned response for XML parsing:', cleanedResponse);
 
   const toolUsages = parseOutToolTags(cleanedResponse);
   
-  for (const usage of toolUsages) {
+  // Log the parsed tool usages
+  console.log('Parsed tool usages:', JSON.stringify(toolUsages, null, 2));
+
+  let lastToolResult: any;
+  
+  for (const [index, usage] of toolUsages.entries()) {
     const { server_name, tool_name, arguments: toolArgs } = usage;
+    console.log(`Executing step ${index + 1}/${toolUsages.length}: ${server_name}/${tool_name}`);
+
     try {
-      const toolResult = await mcpHubInstance.callTool(
+      lastToolResult = await mcpHubInstance.callTool(
         server_name!,
         tool_name!,
-        toolArgs,
+        {
+          ...toolArgs,
+          ...(index > 0 && toolArgs.requiresPreviousResult ? { previousResult: lastToolResult } : {})
+        }
       );
-      console.log(`Tool result [${server_name}/${tool_name}]:`, toolResult);
+      
+      console.log(`Tool result [${server_name}/${tool_name}]:`, lastToolResult);
+
+      const verificationResult = await verifyToolSuccess(lastToolResult, { 
+        server_name: server_name!, 
+        tool_name: tool_name! 
+      });
+      
+      if (!verificationResult.success) {
+        console.error(`Step ${index + 1} failed: ${verificationResult.message}`);
+        throw new Error(`Tool verification failed: ${verificationResult.message}`);
+      }
+
+      // Add delay between steps if needed
+      if (index < toolUsages.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
     } catch (error) {
-      console.error(`Tool error [${server_name}/${tool_name}]:`, error);
-      // Don't throw, just continue with other operations
+      console.error(`Failed at step ${index + 1}/${toolUsages.length}:`, error);
+      throw error;
     }
   }
 
   return cleanedResponse;
+}
+
+/**
+ * Generic verification function that relies on standard tool response format
+ */
+async function verifyToolSuccess(
+  toolResult: McpToolCallResponse,
+  context: { server_name: string, tool_name: string }
+): Promise<{ success: boolean; message: string }> {
+  if (!toolResult) {
+    return { 
+      success: false, 
+      message: `Tool ${context.server_name}/${context.tool_name} returned no result` 
+    };
+  }
+
+  // Use the isError field from our schema
+  const success = !toolResult.isError;
+  
+  // Extract message from content if available
+  const message = toolResult.content
+    .filter(item => item.type === 'text')
+    .map(item => (item as { text: string }).text)
+    .join('\n') || `${context.server_name}/${context.tool_name} execution completed`;
+
+  return { success, message };
 }
 
 export async function streamEditApp(
@@ -343,36 +448,30 @@ export async function streamEditApp(
  * Example utility function to extract <use_mcp_tool> declarations from the LLM's response text.
  * This is very flexible; you might choose a more robust XML parser if needed.
  */
-function parseOutToolTags(llmOutput: string) {
-  // Simple regex to capture everything inside <use_mcp_tool> ... </use_mcp_tool>
-  const toolUsageRegex = /<use_mcp_tool>[\s\S]*?<\/use_mcp_tool>/g;
-  const matches = llmOutput.match(toolUsageRegex) || [];
-
-  return matches.map((block) => {
-    // Extract server_name, tool_name, and JSON arguments
-    const serverNameMatch = block.match(/<server_name>([\s\S]*?)<\/server_name>/);
-    const toolNameMatch = block.match(/<tool_name>([\s\S]*?)<\/tool_name>/);
-    const argumentsMatch = block.match(/<arguments>([\s\S]*?)<\/arguments>/);
-
-    const server_name = serverNameMatch ? serverNameMatch[1]?.trim() : "";
-    const tool_name = toolNameMatch ? toolNameMatch[1]?.trim() : "";
-
+function parseOutToolTags(text: string): Array<{
+  server_name: string | undefined;
+  tool_name: string | undefined;
+  arguments: Record<string, unknown>;
+}> {
+  const toolPattern = /<use_mcp_tool>\s*<server_name>(.*?)<\/server_name>\s*<tool_name>(.*?)<\/tool_name>\s*<arguments>\s*([\s\S]*?)\s*<\/arguments>\s*<\/use_mcp_tool>/g;
+  
+  const matches = Array.from(text.matchAll(toolPattern));
+  console.log('Found tool matches:', matches.length);
+  
+  return matches.map(match => {
+    const [_, server_name, tool_name, argsText] = match;
+    
     let parsedArgs: Record<string, unknown> = {};
-    if (argumentsMatch) {
-      const rawArgs = argumentsMatch[1]?.trim();
-
-      // Attempt to parse the JSON in the <arguments> block
-      try {
-        parsedArgs = JSON.parse(rawArgs!);
-      } catch (err) {
-        console.warn("Failed to parse arguments from <use_mcp_tool>", err);
-        // fallback to an empty object so we don't break everything
-      }
+    try {
+      parsedArgs = JSON.parse(argsText!.trim());
+    } catch (err) {
+      console.warn("Failed to parse arguments from <use_mcp_tool>", err);
+      console.log("Raw args text:", argsText);
     }
 
     return {
-      server_name,
-      tool_name,
+      server_name: server_name?.trim(),
+      tool_name: tool_name?.trim(),
       arguments: parsedArgs,
     };
   });

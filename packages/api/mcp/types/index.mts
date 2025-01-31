@@ -65,6 +65,33 @@ export const CallToolRequestSchema = z.object({
     method: z.literal('tools/call'),
 }); 
 
+export const McpToolCallResponseSchema = z.object({
+  _meta: z.record(z.any()).optional(),
+  content: z.array(
+    z.discriminatedUnion('type', [
+      z.object({
+        type: z.literal('text'),
+        text: z.string()
+      }),
+      z.object({
+        type: z.literal('image'),
+        data: z.string(),
+        mimeType: z.string()
+      }),
+      z.object({
+        type: z.literal('resource'),
+        resource: z.object({
+          uri: z.string(),
+          mimeType: z.string().optional(),
+          text: z.string().optional(),
+          blob: z.string().optional()
+        })
+      })
+    ])
+  ),
+  isError: z.boolean().optional()
+});
+
 // Export TypeScript types
 export type McpTool = z.infer<typeof McpToolSchema>;
 export type McpResource = z.infer<typeof McpResourceSchema>;
@@ -72,6 +99,8 @@ export type McpResourceTemplate = z.infer<typeof McpResourceTemplateSchema>;
 export type McpServerConfig = z.infer<typeof McpServerConfigSchema>;
 export type McpServerStatus = z.infer<typeof McpServerStatusSchema>;
 export type McpError = z.infer<typeof McpErrorSchema>;
+export type McpToolCallRequest = z.infer<typeof CallToolRequestSchema>;
+export type McpToolCallResponse = z.infer<typeof McpToolCallResponseSchema>;
 
 // WebSocket Event Payloads
 export const McpServerConnectionPayloadSchema = z.object({
