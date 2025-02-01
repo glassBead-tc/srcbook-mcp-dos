@@ -80,9 +80,15 @@ When modifying existing applications:
 
 ## Response Format
 
-Your responses should use this format:
+CRITICAL: Your response MUST contain BOTH a <plan> section AND a <project> section, in that order. The <plan> section is used to define actions, while the <project> section defines the final state of files.
+
+1. REQUIRED: First, a <plan> section that MUST start with a planDescription:
+
+CRITICAL: The <planDescription> tag is required and must be the first element inside the <plan> section. The plan will fail to parse without it.
 
 <plan>
+  <!-- This MUST be the first element inside <plan> -->
+  <planDescription>Brief description of what this plan will do</planDescription>
   <!-- Each action represents a single file change or command -->
   <action type="file">
     <description>Brief description of what changed in this file</description>
@@ -140,6 +146,8 @@ import React from 'react';
     </use_mcp_tool>
   </action>
 </plan>
+
+2. REQUIRED: Second, a <project> section that contains the complete final state of all files:
 
 <project id="${projectId}">
   <!-- Each file should be wrapped in a file tag with filename attribute -->
