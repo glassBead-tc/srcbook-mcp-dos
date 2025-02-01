@@ -1,18 +1,65 @@
 import { z } from 'zod';
 
 // Core MCP Schemas
+export type DangerLevel = 'none' | 'low' | 'medium' | 'high';
+
+export interface ToolSafetyMetadata {
+  isDangerous?: boolean;
+  dangerLevel?: DangerLevel;
+  dangerDescription?: string;
+  requiresConfirmation?: boolean;
+  confirmationMessage?: string;
+}
+
+export interface McpTool {
+  name: string;
+  description?: string;
+  safety?: ToolSafetyMetadata;
+  inputSchema: {
+    type: 'object';
+    properties: Record<string, { 
+      type: string; 
+      description?: string;
+      enum?: any[];
+    }>;
+    required?: string[];
+  };
+}
+
 export const McpToolSchema = z.object({
   name: z.string(),
   description: z.string().optional(),
+  safety: z.object({
+    isDangerous: z.boolean().optional(),
+    dangerLevel: z.enum(['none', 'low', 'medium', 'high']).optional(),
+    dangerDescription: z.string().optional(),
+    requiresConfirmation: z.boolean().optional(),
+    confirmationMessage: z.string().optional()
+  }).optional(),
   inputSchema: z.object({
     type: z.literal('object'),
     properties: z.record(z.object({
       type: z.string(),
-      description: z.string().optional()
-    })),
+      description: z.string().optional(),
+      enum: z.array(z.any()).optional()
+    })).optional().transform(val => val ?? {}),
     required: z.array(z.string()).optional()
   })
-});
+}).transform((val): McpTool => ({
+  ...val,
+  inputSchema: {
+    ...val.inputSchema,
+    properties: val.inputSchema.properties ?? {}
+  }
+}));
+
+type InferredMcpTool = z.infer<typeof McpToolSchema>;
+type _typeCheck = InferredMcpTool extends McpTool ? true : false;
+
+// Server Context Types
+export * from './servers/context.mjs';
+export * from './servers/filesystem.mjs';
+export * from './servers/github.mjs';
 
 export const McpResourceSchema = z.object({
   uri: z.string(),
@@ -65,13 +112,41 @@ export const CallToolRequestSchema = z.object({
     method: z.literal('tools/call'),
 }); 
 
+export const McpToolCallResponseSchema = z.object({
+  _meta: z.record(z.any()).optional(),
+  content: z.array(
+    z.discriminatedUnion('type', [
+      z.object({
+        type: z.literal('text'),
+        text: z.string()
+      }),
+      z.object({
+        type: z.literal('image'),
+        data: z.string(),
+        mimeType: z.string()
+      }),
+      z.object({
+        type: z.literal('resource'),
+        resource: z.object({
+          uri: z.string(),
+          mimeType: z.string().optional(),
+          text: z.string().optional(),
+          blob: z.string().optional()
+        })
+      })
+    ])
+  ),
+  isError: z.boolean().optional()
+});
+
 // Export TypeScript types
-export type McpTool = z.infer<typeof McpToolSchema>;
 export type McpResource = z.infer<typeof McpResourceSchema>;
 export type McpResourceTemplate = z.infer<typeof McpResourceTemplateSchema>;
 export type McpServerConfig = z.infer<typeof McpServerConfigSchema>;
 export type McpServerStatus = z.infer<typeof McpServerStatusSchema>;
 export type McpError = z.infer<typeof McpErrorSchema>;
+export type McpToolCallRequest = z.infer<typeof CallToolRequestSchema>;
+export type McpToolCallResponse = z.infer<typeof McpToolCallResponseSchema>;
 
 // WebSocket Event Payloads
 export const McpServerConnectionPayloadSchema = z.object({
@@ -88,3 +163,21 @@ export const McpToolResultPayloadSchema = z.object({
 export type McpServerConnectionPayload = z.infer<typeof McpServerConnectionPayloadSchema>;
 export type McpServerStatusUpdatePayload = z.infer<typeof McpServerStatusUpdatePayloadSchema>;
 export type McpToolResultPayload = z.infer<typeof McpToolResultPayloadSchema>;
+
+export interface LLMPromptContext {
+  serverName: string;
+  toolName: string;
+  missingFields: Array<{
+    name: string;
+    type: string;
+    description?: string;
+  }>;
+  currentArgs: Record<string, any>;
+  attemptCount: number;
+}
+
+export interface LLMPromptResult {
+  providedValues: Record<string, any>;
+  shouldPromptUser: boolean;
+  userPrompt?: string;
+}

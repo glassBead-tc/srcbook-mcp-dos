@@ -14,9 +14,13 @@ export function register(wss: WebSocketServer, mcpHub: typeof mcpHubInstance) {
     .channel('tool:<toolId>')
     // Listen for tool execution requests
     .on('tool:execute', MCPToolExecutionSchema, async (payload, context, conn) => {
+      console.log(`[MCP Tool Request] Server: ${payload.serverName}, Tool: ${payload.toolName}`);
+      console.log('[MCP Tool Request] Parameters:', JSON.stringify(payload.params, null, 2));
+      
       const toolSchema = knownToolSchemas[payload.toolName];
       if (toolSchema) {
         const validatedParams = toolSchema.parse(payload.params);
+        console.log(payload.serverName, payload.toolName, validatedParams)
         const result = await mcpHub.callTool(
           payload.serverName,
           payload.toolName,

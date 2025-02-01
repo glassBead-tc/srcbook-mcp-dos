@@ -1,4 +1,24 @@
 import { z } from 'zod';
+import { BaseServerContext, BaseServerContextSchema } from './context.mjs';
+
+// GitHub server context types
+export interface GitHubServerContext extends BaseServerContext {
+  type: 'github';
+  config: {
+    defaultBranch: string;
+    defaultOwner?: string;
+    defaultRepo?: string;
+  };
+}
+
+export const GitHubServerContextSchema = BaseServerContextSchema.extend({
+  type: z.literal('github'),
+  config: z.object({
+    defaultBranch: z.string(),
+    defaultOwner: z.string().optional(),
+    defaultRepo: z.string().optional()
+  })
+});
 
 // Base schemas for common types
 export const GitHubAuthorSchema = z.object({

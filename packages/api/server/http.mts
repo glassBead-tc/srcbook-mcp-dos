@@ -64,6 +64,7 @@ import { AppGenerationFeedbackType } from '@srcbook/shared';
 import { createZipFromApp } from '../apps/disk.mjs';
 import { checkoutCommit, commitAllFiles, getCurrentCommitSha } from '../apps/git.mjs';
 import { streamJsonResponse } from './utils.mjs';
+import mcpHubInstance from '../mcp/mcphub.mjs';
 
 const app: Application = express();
 
@@ -798,6 +799,30 @@ router.post('/apps/:id/history', cors(), async (req, res) => {
   const { messages } = req.body;
   await appendToHistory(id, messages);
   return res.json({ data: { success: true } });
+});
+
+router.options('/mcp/tool', cors());
+router.post('/mcp/tool', cors(), async (req, res) => {
+  const { serverName, toolName, arguments: toolArgs } = req.body;
+
+  if (!serverName || !toolName) {
+    return res.status(400).json({ 
+      error: true, 
+      message: 'serverName and toolName are required' 
+    });
+  }
+
+  try {
+    const mcpHub = mcpHubInstance;
+    const result = await mcpHub.callTool(serverName, toolName, toolArgs || {});
+    return res.json({ error: false, result });
+  } catch (error) {
+    console.error('MCP tool call failed:', error);
+    return res.status(500).json({ 
+      error: true, 
+      message: error instanceof Error ? error.message : String(error)
+    });
+  }
 });
 
 router.options('/apps/:id/feedback', cors());

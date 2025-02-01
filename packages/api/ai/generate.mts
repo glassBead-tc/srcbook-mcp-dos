@@ -14,6 +14,11 @@ import { PROMPTS_DIR } from '../constants.mjs';
 import { encode, decodeCells } from '../srcmd.mjs';
 import { buildProjectXml, type FileContent } from '../ai/app-parser.mjs';
 import { logAppGeneration } from './logger.mjs';
+import mcpHubInstance from '../mcp/mcphub.mjs';
+import { SYSTEM_PROMPT } from "../prompts/system-scratch.mjs";
+import { getToolExecutor } from './tool-executor-singleton.mjs';
+
+console.log('MCPHub instance:', mcpHubInstance);
 
 const makeGenerateSrcbookSystemPrompt = () => {
   return readFileSync(Path.join(PROMPTS_DIR, 'srcbook-generator.txt'), 'utf-8');
@@ -26,12 +31,12 @@ const makeGenerateCellSystemPrompt = (language: CodeLanguageType) => {
 const makeFixDiagnosticsSystemPrompt = () => {
   return readFileSync(Path.join(PROMPTS_DIR, 'fix-cell-diagnostics.txt'), 'utf-8');
 };
-const makeAppBuilderSystemPrompt = () => {
-  return readFileSync(Path.join(PROMPTS_DIR, 'app-builder.txt'), 'utf-8');
-};
-const makeAppEditorSystemPrompt = () => {
-  return readFileSync(Path.join(PROMPTS_DIR, 'app-editor.txt'), 'utf-8');
-};
+// const makeAppBuilderSystemPrompt = () => {
+//   return readFileSync(Path.join(PROMPTS_DIR, 'app-builder.txt'), 'utf-8');
+// };
+// const makeAppEditorSystemPrompt = () => {
+//   return readFileSync(Path.join(PROMPTS_DIR, 'app-editor.txt'), 'utf-8');
+// };
 
 const makeAppEditorUserPrompt = (projectId: string, files: FileContent[], query: string) => {
   const projectXml = buildProjectXml(files, projectId);
@@ -243,18 +248,58 @@ export async function fixDiagnostics(
   return result.text;
 }
 
+/**
+ * High-level function demonstrating how to:
+ * 1. Build a dynamic system prompt that includes list of connected servers/tools
+ * 2. Call LLM with that system prompt + userPrompt
+ * 3. Parse the returned text for tool usage tags
+ * 4. Call the requested MCP tools
+ */
 export async function generateApp(
   projectId: string,
   files: FileContent[],
   query: string,
 ): Promise<string> {
+  console.log('Starting generateApp with query:', query);
+  await waitForMcpInit();
+
+  const systemPrompt = await SYSTEM_PROMPT(mcpHubInstance, projectId);
+  console.log('System prompt:', systemPrompt);
+  
+  const userPrompt = makeAppCreateUserPrompt(projectId, files, query);
+  console.log('User prompt:', userPrompt);
+  
   const model = await getModel();
-  const result = await generateText({
+  const llmResult = await generateText({
     model,
-    system: makeAppBuilderSystemPrompt(),
-    prompt: makeAppCreateUserPrompt(projectId, files, query),
+    system: systemPrompt,
+    prompt: userPrompt,
   });
-  return result.text;
+
+  console.log('Raw LLM response before any processing:', llmResult.text);
+
+  // Add detailed logging of the LLM response
+  console.log('Raw LLM response:', llmResult.text);
+
+  // Strip any content before the first <plan> tag
+  const planStart = llmResult.text.indexOf('<plan>');
+  if (planStart === -1) {
+    console.error('Raw LLM response:', llmResult.text);
+    throw new Error('LLM response does not contain a <plan> tag');
+  }
+  const cleanedResponse = llmResult.text.slice(planStart);
+  
+  // Log the cleaned response before parsing
+  console.log('Cleaned response for XML parsing:', cleanedResponse);
+
+  const toolUsages = parseOutToolTags(cleanedResponse);
+  
+  // Log the parsed tool usages
+  console.log('Parsed tool usages:', JSON.stringify(toolUsages, null, 2));
+
+  await executeToolCalls(toolUsages);
+
+  return cleanedResponse;
 }
 
 export async function streamEditApp(
@@ -264,33 +309,129 @@ export async function streamEditApp(
   appId: string,
   planId: string,
 ) {
-  const model = await getModel();
+  // Wait for BOTH MCP and initial compilation
+  await Promise.all([
+    waitForMcpInit(),
+    new Promise(resolve => setTimeout(resolve, 2000)) // Give compilation time to finish
+  ]);
 
-  const systemPrompt = makeAppEditorSystemPrompt();
+  const model = await getModel();
+  const systemPrompt = await SYSTEM_PROMPT(mcpHubInstance, projectId);
   const userPrompt = makeAppEditorUserPrompt(projectId, files, query);
 
   let response = '';
+  let toolUsages: Array<{
+    server_name: string | undefined;
+    tool_name: string | undefined;
+    arguments: Record<string, unknown>;
+  }> = [];
+  let planExecuted = false;
 
   const result = await streamText({
     model,
     system: systemPrompt,
     prompt: userPrompt,
-    onChunk: (chunk) => {
+    onChunk: async (chunk) => {
+      if (planExecuted) return;
+      
       if (chunk.chunk.type === 'text-delta') {
         response += chunk.chunk.textDelta;
+        
+        if (!planExecuted && response.includes('</plan>')) {
+          planExecuted = true;
+          const planStart = response.indexOf('<plan>');
+          if (planStart !== -1) {
+            const cleanedResponse = response.slice(planStart);
+            toolUsages = parseOutToolTags(cleanedResponse);
+            await executeToolCalls(toolUsages);
+          }
+        }
       }
-    },
-    onFinish: () => {
-      if (process.env.SRCBOOK_DISABLE_ANALYTICS !== 'true') {
-        logAppGeneration({
-          appId,
-          planId,
-          llm_request: { model, system: systemPrompt, prompt: userPrompt },
-          llm_response: response,
-        });
-      }
-    },
+    }
   });
 
   return result.textStream;
-} 
+}
+
+/**
+ * Helper function to wait for MCP initialization
+ */
+async function waitForMcpInit() {
+  while (!mcpHubInstance.isInitialized) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+}
+
+// Add a simple interface for the tool execution result
+interface ToolResult {
+  success: boolean;
+  data?: unknown;
+  error?: string;
+  missingFields?: string[];
+}
+
+async function executeToolCalls(
+  toolUsages: Array<{
+    server_name: string | undefined;
+    tool_name: string | undefined;
+    arguments: Record<string, unknown>;
+  }>,
+): Promise<any> {
+  for (const usage of toolUsages) {
+    const { server_name, tool_name, arguments: toolArgs } = usage;
+    
+    // Get the executor ONCE before the loop
+    const toolExecutor = await getToolExecutor();
+    
+    // Then use it for all tools
+    const result = await toolExecutor.executeTool({
+      serverName: server_name!,
+      toolName: tool_name!,
+      arguments: toolArgs
+    });
+
+    if (!result.success) {
+      throw new Error(`Tool execution failed: ${result.error || 'Unknown error'}`);
+    }
+  }
+}
+
+/**
+ * Example utility function to extract <use_mcp_tool> declarations from the LLM's response text.
+ * This is very flexible; you might choose a more robust XML parser if needed.
+ */
+function parseOutToolTags(text: string): Array<{
+  server_name: string | undefined;
+  tool_name: string | undefined;
+  arguments: Record<string, unknown>;
+}> {
+  const toolPattern = /<use_mcp_tool>\s*<server_name>(.*?)<\/server_name>\s*<tool_name>(.*?)<\/tool_name>\s*<arguments>\s*([\s\S]*?)\s*<\/arguments>\s*<\/use_mcp_tool>/g;
+  
+  const matches = Array.from(text.matchAll(toolPattern));
+  console.log('Found tool matches:', matches.length);
+  
+  const tools = matches.map(match => {
+    const [_, server_name, tool_name, argsText] = match;
+    
+    let parsedArgs: Record<string, unknown> = {};
+    try {
+      parsedArgs = JSON.parse(argsText!.trim());
+      console.log('Parsed tool arguments:', {
+        server_name,
+        tool_name,
+        arguments: parsedArgs
+      });
+    } catch (err) {
+      console.warn("Failed to parse arguments from <use_mcp_tool>", err);
+      console.log("Raw args text:", argsText);
+    }
+
+    return {
+      server_name: server_name?.trim(),
+      tool_name: tool_name?.trim(),
+      arguments: parsedArgs,
+    };
+  });
+  
+  return tools;
+}

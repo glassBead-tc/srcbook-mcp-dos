@@ -12,6 +12,10 @@ export const xmlSchema: Record<string, NodeSchema> = {
   commandType: { isContentNode: true, hasCdata: false },
   package: { isContentNode: true, hasCdata: false },
   planDescription: { isContentNode: true, hasCdata: true },
+  use_mcp_tool: { isContentNode: false, hasCdata: false },
+  server_name: { isContentNode: true, hasCdata: false },
+  tool_name: { isContentNode: true, hasCdata: false },
+  arguments: { isContentNode: true, hasCdata: false }
 };
 
 export type TagType = {
