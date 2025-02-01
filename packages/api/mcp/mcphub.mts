@@ -4,12 +4,11 @@ import {
   ListToolsResultSchema,
   ListResourcesResultSchema,
   ListResourceTemplatesResultSchema,
-  InitializeResultSchema, // Ensure this is correctly imported
+  InitializeResultSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { loadMcpConfig } from './config.mjs';
 import { z } from 'zod';
 
-// Define TypeScript interfaces for strong typing
 interface ClientInfo {
   name: string;
   version: string;
@@ -36,13 +35,13 @@ interface McpConnection {
     toolId: string;
     startTime: number;
   };
+  lastSuccessfulConnection?: number;
 }
 
 interface ServerCapabilities {
   tools?: boolean;
   resources?: boolean;
   resourceTemplates?: boolean;
-  // Add other capabilities as needed
 }
 
 interface Tool {
@@ -56,11 +55,6 @@ export class MCPHub {
   private static instance: MCPHub;
   private connections: Map<string, McpConnection> = new Map();
   private statusListeners: ((name: string, status: Omit<McpConnection, 'client' | 'transport'>) => void)[] = [];
-  // private toolResultListeners: ((name: string, toolId: string, result: any) => void)[] = [];
-
-  /**
-   * Queue for managing sequential tool calls
-   */
   private toolCallQueue: Map<string, Array<{
     toolId: string;
     params: Record<string, any>;
@@ -72,6 +66,12 @@ export class MCPHub {
   private config!: McpConfig;
   private allTools: Map<string, Tool[]> = new Map();
   private toolsInitialized = false;
+  private connectionRetryAttempts: Map<string, number> = new Map();
+  private readonly MAX_RETRY_ATTEMPTS = 3;
+  private readonly RETRY_DELAY = 1000; // 1 second
+  private readonly CONNECTION_TIMEOUT = 10000; // 10 seconds
+  private readonly MAX_CONCURRENT_OPERATIONS = 5;
+  private activeOperationCount = 0;
 
   private constructor() {
     console.log('Creating new MCPHub instance.');
@@ -86,15 +86,10 @@ export class MCPHub {
     return MCPHub.instance;
   }
 
-  // Add getter for isInitialized (post-video)
   public get isInitialized(): boolean {
     return this.initialized;
   }
 
-  /**
-   * Initialize the MCPHub and connect to all configured servers.
-   * Should be called once during application startup.
-   */
   async initialize(): Promise<void> {
     if (this.initialized) {
       console.warn('MCPHub already initialized.');
@@ -114,10 +109,9 @@ export class MCPHub {
         Object.keys(this.config.mcpServers),
       );
 
-      // Connect to all servers in parallel
       await Promise.all(
         Object.entries(this.config.mcpServers).map(([name]) =>
-          this.connectServer(name).catch((error) => {
+          this.ensureConnection(name).catch((error) => {
             console.error(`Failed to connect to server ${name}:`, error);
           }),
         ),
@@ -128,17 +122,32 @@ export class MCPHub {
     }
   }
 
-  /**
-   * Creates a new connection to a server, storing references to each transport/client.
-   */
+  private async ensureConnection(name: string): Promise<void> {
+    const conn = this.connections.get(name);
+    if (conn?.status === 'connected') {
+      return;
+    }
+
+    const attempts = this.connectionRetryAttempts.get(name) || 0;
+    if (attempts >= this.MAX_RETRY_ATTEMPTS) {
+      throw new Error(`Max retry attempts (${this.MAX_RETRY_ATTEMPTS}) reached for server ${name}`);
+    }
+
+    try {
+      await this.connectServer(name);
+      this.connectionRetryAttempts.set(name, 0);
+    } catch (error) {
+      this.connectionRetryAttempts.set(name, attempts + 1);
+      throw error;
+    }
+  }
+
   private async connectServer(name: string): Promise<void> {
-    // If already connected, remove old connection first
     if (this.connections.has(name)) {
       console.log(`Disconnecting from existing server: ${name}`);
       await this.disconnectServer(name);
     }
 
-    // Create a new client
     const client = new Client(
       {
         name: 'Srcbook',
@@ -149,46 +158,43 @@ export class MCPHub {
       },
     );
 
-    // Retrieve the configuration for the specified server by name
     const serverConfig = this.config.mcpServers[name];
-
-    // Validate that a configuration exists for the given server
     if (!serverConfig) {
       throw new Error(`No configuration found for server: ${name}`);
     }
 
-    // Filter out undefined values from the process environment variables
-    // This ensures only valid key-value pairs are included
     const filteredEnv: Record<string, string> = Object.fromEntries(
-      Object.entries(process.env).filter(([_, val]) => val !== undefined), // Exclude undefined values
+      Object.entries(process.env).filter(([_, val]) => val !== undefined),
     ) as Record<string, string>;
 
-    // Merge the filtered system environment variables with the server-specific environment variables
-    // - `filteredEnv` ensures the base environment is clean and valid
-    // - `serverConfig.env` allows for server-specific overrides or additions
     const mergedEnv = {
-      ...filteredEnv, // Include all valid global environment variables
-      ...(serverConfig.env || {}), // Add or override with server-specific variables
+      ...filteredEnv,
+      ...(serverConfig.env || {}),
     };
 
     const transport = new StdioClientTransport({
-      command: serverConfig.command, // Use command from config
-      args: serverConfig.args, // Use args from config
+      command: serverConfig.command,
+      args: serverConfig.args,
       env: mergedEnv,
       stderr: 'pipe',
     });
 
-    // Initialize connection in 'connecting' state
+    if (transport.stderr) {
+      transport.stderr.on('data', (data: Buffer) => {
+        console.error(`[${name} stderr] ${data.toString()}`);
+      });
+    }
+
     const conn: McpConnection = {
       client,
       transport,
       status: 'connecting',
       capabilities: {},
+      lastSuccessfulConnection: undefined,
     };
     this.connections.set(name, conn);
     this.notifyStatusChange(name, conn);
 
-    // Register events
     transport.onerror = async (error) => {
       if (conn.status !== 'disconnected') {
         conn.status = 'disconnected';
@@ -208,36 +214,31 @@ export class MCPHub {
     };
 
     try {
-      // Logging Connection Attempt
       console.log(`Attempting to connect to server: ${name}`);
       console.log(
         `Command: ${serverConfig.command} ${serverConfig.args ? serverConfig.args.join(' ') : ''}`,
       );
       console.log(`Environment Variables:`, serverConfig.env || {});
 
-      // Handling Standard Error (stderr) Output
-      if (transport.stderr) {
-        transport.stderr.on('data', (data: Buffer) => {
-          console.error(`[${name} stderr]: ${data.toString()}`);
-        });
-      }
+      const connectPromise = client.connect(transport);
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error(`Connection timeout for server ${name}`)), this.CONNECTION_TIMEOUT);
+      });
 
-      // Connect the client (this will start the transport)
-      await client.connect(transport);
+      await Promise.race([connectPromise, timeoutPromise]);
+
       console.log(`Successfully connected to server: ${name}`);
       conn.status = 'connected';
       conn.error = undefined;
+      conn.lastSuccessfulConnection = Date.now();
       this.notifyStatusChange(name, conn);
 
-      // Define clientInfo
       const clientInfo: ClientInfo = {
         name: 'Srcbook',
         version: '1.0.0',
         description: 'Srcbook MCP Client',
       };
 
-      // Establish the connection
-      // Parse server capabilities from the initialize response
       const initializeResponse = await client.request(
         {
           method: 'initialize',
@@ -247,10 +248,9 @@ export class MCPHub {
             clientInfo,
           },
         },
-        InitializeResultSchema, // Ensure this schema matches the server response
+        InitializeResultSchema,
       );
 
-      // Parse server capabilities from the initialize response
       if (initializeResponse && initializeResponse.capabilities) {
         conn.capabilities = {
           tools: !!initializeResponse.capabilities.tools,
@@ -262,11 +262,15 @@ export class MCPHub {
         console.warn(`No capabilities received from server ${name}.`);
       }
 
-      // Conditionally list tools and resources based on dynamic capabilities
       if (conn.capabilities.tools) {
         try {
           const tools = await this.listTools(name);
           console.log(`Tools on server ${name}:`, tools);
+          const toolsWithServer = tools.map(tool => ({
+            ...tool,
+            serverName: name
+          }));
+          this.allTools.set(name, toolsWithServer);
         } catch (error) {
           console.error(`Error listing tools on server ${name}:`, error);
         }
@@ -298,13 +302,7 @@ export class MCPHub {
     }
   }
 
-  /**
-   * Disconnect from a server and clean up references.
-   */
   private async disconnectServer(name: string): Promise<void> {
-    if (!this.connections.has(name)) {
-      return;
-    }
     const conn = this.connections.get(name);
     if (!conn) return;
 
@@ -318,29 +316,26 @@ export class MCPHub {
     this.connections.delete(name);
   }
 
-  /**
-   * Enqueues a tool call and processes it when previous calls are complete
-   */
   private async enqueueToolCall(
     serverName: string, 
     toolId: string, 
     params: Record<string, any>
   ): Promise<any> {
+    if (this.activeOperationCount >= this.MAX_CONCURRENT_OPERATIONS) {
+      throw { type: 'overloaded_error', message: 'Too many concurrent operations. Please try again later.' };
+    }
+
     return new Promise((resolve, reject) => {
       const queue = this.toolCallQueue.get(serverName) || [];
       queue.push({ toolId, params, resolve, reject });
       this.toolCallQueue.set(serverName, queue);
 
-      // If this is the only item in the queue, process it immediately
       if (queue.length === 1) {
         this.processNextToolCall(serverName);
       }
     });
   }
 
-  /**
-   * Processes the next tool call in queue
-   */
   private async processNextToolCall(serverName: string): Promise<void> {
     const queue = this.toolCallQueue.get(serverName) || [];
     const currentCall = queue[0];
@@ -353,15 +348,34 @@ export class MCPHub {
     }
 
     try {
+      this.activeOperationCount++;
+      console.log(`[${new Date().toISOString()}] 🔧 Executing tool call:`, {
+        serverName,
+        toolId: currentCall.toolId,
+        transportStatus: conn.status,
+        connectionStatus: conn.status
+      });
+
       const result = await conn.client.callTool({
         name: currentCall.toolId,
         arguments: currentCall.params,
       });
       currentCall.resolve(result);
     } catch (error) {
+      console.error(`[${new Date().toISOString()}] ❌ Tool call error:`, {
+        error: error instanceof Error ? {
+          name: error.name,
+          message: error.message,
+          stack: error.stack,
+        } : error,
+        serverName,
+        toolId: currentCall.toolId,
+        transportStatus: conn.status,
+        connectionStatus: conn.status
+      });
       currentCall.reject(error as Error);
     } finally {
-      // Remove processed call and start next one
+      this.activeOperationCount--;
       queue.shift();
       this.toolCallQueue.set(serverName, queue);
       
@@ -371,24 +385,94 @@ export class MCPHub {
     }
   }
 
-  /**
-   * Call a tool with parameters
-   */
   async callTool(
     serverName: string,
     toolId: string,
     params: Record<string, any>
   ): Promise<any> {
-    console.log(`[MCP Hub] Executing tool on server ${serverName}:`);
-    console.log(`[MCP Hub] - Tool ID: ${toolId}`);
-    console.log(`[MCP Hub] - Parameters:`, JSON.stringify(params, null, 2));
-    
-    return this.enqueueToolCall(serverName, toolId, params);
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] 📝 Tool call requested:`, {
+      serverName,
+      toolId,
+      params: JSON.stringify(params, null, 2)
+    });
+
+    // Import trackOperation function
+    const { trackOperation } = await import('../dev-server.mjs');
+
+    // Create a promise for the entire operation
+    const operation = (async () => {
+      // Get or establish connection
+      let conn = this.connections.get(serverName);
+      if (!conn || conn.status !== 'connected') {
+        try {
+          await this.ensureConnection(serverName);
+          conn = this.connections.get(serverName);
+        } catch (error) {
+          const errorMsg = `Failed to establish connection to server ${serverName}: ${error instanceof Error ? error.message : String(error)}`;
+          console.error(`[${timestamp}] ❌ ${errorMsg}`);
+          throw new Error(errorMsg);
+        }
+      }
+
+      if (!conn || conn.status !== 'connected') {
+        const error = `Server ${serverName} is not connected. Status: ${conn?.status || 'unknown'}`;
+        console.error(`[${timestamp}] ❌ ${error}`);
+        throw new Error(error);
+      }
+
+      // Validate and get tool
+      const tools = await this.listTools(serverName);
+      const tool = tools.find(t => t.name === toolId);
+      if (!tool) {
+        const error = `Tool '${toolId}' not found on server ${serverName}. Available tools: ${tools.map(t => t.name).join(', ')}`;
+        console.error(`[${timestamp}] ❌ ${error}`);
+        throw new Error(error);
+      }
+
+      // Execute tool call with retry logic
+      let lastError: Error | undefined;
+      for (let attempt = 0; attempt < this.MAX_RETRY_ATTEMPTS; attempt++) {
+        try {
+          console.log(`[${timestamp}] 🔄 Attempting tool call (attempt ${attempt + 1}/${this.MAX_RETRY_ATTEMPTS})`);
+          const result = await this.enqueueToolCall(serverName, toolId, params);
+          console.log(`[${timestamp}] ✅ Tool call completed:`, {
+            serverName,
+            toolId,
+            result: typeof result === 'object' ? JSON.stringify(result, null, 2) : result
+          });
+          return result;
+        } catch (error) {
+          lastError = error instanceof Error ? error : new Error(String(error));
+          console.error(`[${timestamp}] ⚠️ Tool call attempt ${attempt + 1} failed:`, {
+            error: lastError,
+            willRetry: attempt < this.MAX_RETRY_ATTEMPTS - 1
+          });
+
+          if (attempt < this.MAX_RETRY_ATTEMPTS - 1) {
+            await new Promise(resolve => setTimeout(resolve, this.RETRY_DELAY));
+            // Try to re-establish connection if needed
+            await this.ensureConnection(serverName);
+          }
+        }
+      }
+
+      // If we get here, all attempts failed
+      const enhancedError = new Error(
+        `Failed to execute tool '${toolId}' on server '${serverName}' after ${this.MAX_RETRY_ATTEMPTS} attempts: ${lastError?.message}\n` +
+        `Server status: ${conn.status}\n` +
+        `Connection error: ${conn.error || 'none'}`
+      );
+      throw enhancedError;
+    })();
+
+    // Track the operation
+    trackOperation(operation);
+
+    // Return the operation result
+    return operation;
   }
 
-  /**
-   * List available tools on a connected server.
-   */
   async listTools(serverName: string): Promise<z.infer<typeof ListToolsResultSchema>['tools']> {
     const conn = this.connections.get(serverName);
     if (!conn || conn.status !== 'connected') {
@@ -406,7 +490,7 @@ export class MCPHub {
     const controller = new AbortController();
     const timeout = setTimeout(() => {
       controller.abort();
-    }, 5000); // 5-second timeout
+    }, 5000);
 
     try {
       const response = await conn.client.request({ method: 'tools/list' }, ListToolsResultSchema);
@@ -424,9 +508,6 @@ export class MCPHub {
     }
   }
 
-  /**
-   * List available resources on a connected server.
-   */
   async listResources(
     serverName: string,
   ): Promise<z.infer<typeof ListResourcesResultSchema>['resources']> {
@@ -448,7 +529,6 @@ export class MCPHub {
       return response.resources || [];
     } catch (error: any) {
       if (error.code === -32601) {
-        // Method not found
         console.warn(`Method 'resources/list' not found on server ${serverName}.`);
       } else {
         console.error(`Error listing resources on server ${serverName}:`, error);
@@ -457,9 +537,6 @@ export class MCPHub {
     }
   }
 
-  /**
-   * List available resource templates on a connected server.
-   */
   async listResourceTemplates(serverName: string): Promise<any[]> {
     const conn = this.connections.get(serverName);
     if (!conn || conn.status !== 'connected') {
@@ -479,7 +556,6 @@ export class MCPHub {
       return response?.resourceTemplates || [];
     } catch (error: any) {
       if (error.code === -32601) {
-        // Method not found
         console.warn(`Method 'resources/templates/list' not found on server ${serverName}.`);
       } else {
         console.error(`Error listing resource templates on server ${serverName}:`, error);
@@ -488,9 +564,6 @@ export class MCPHub {
     }
   }
 
-  /**
-   * Get status information about all connected servers.
-   */
   listConnections(): Array<{
     name: string;
     status: string;
@@ -505,38 +578,24 @@ export class MCPHub {
     }));
   }
 
-  /**
-   * Get connection information for a specific server.
-   */
   getConnection(name: string): McpConnection | undefined {
     return this.connections.get(name);
   }
 
-  /**
-   * Attempt to reconnect to a specific server using its current configuration.
-   */
   async reconnectServer(name: string): Promise<void> {
     const serverConfig = this.config.mcpServers[name];
-
     if (!serverConfig) {
       throw new Error(`No configuration found for server: ${name}`);
     }
-
-    await this.connectServer(name);
+    await this.ensureConnection(name);
   }
 
-  /**
-   * Register a listener for server status changes.
-   */
   onStatusChange(
     listener: (name: string, status: Omit<McpConnection, 'client' | 'transport'>) => void,
   ) {
     this.statusListeners.push(listener);
   }
 
-  /**
-   * Notify all registered listeners of a server status change.
-   */
   private notifyStatusChange(name: string, conn: McpConnection) {
     const status = {
       name,
@@ -587,5 +646,5 @@ export class MCPHub {
   }
 }
 
-const mcpHubInstance = MCPHub.getInstance(); // Use getInstance
+const mcpHubInstance = MCPHub.getInstance();
 export default mcpHubInstance;

@@ -3,6 +3,7 @@ import { z } from 'zod';
 // Base server context interface
 export interface BaseServerContext {
   lastAccessed: Date;
+  mode?: 'web-development' | 'github' | 'default';
   capabilities?: {
     supportsRollback: boolean;
     maxConcurrentCalls: number;
@@ -13,6 +14,7 @@ export interface BaseServerContext {
 // Base server context schema
 export const BaseServerContextSchema = z.object({
   lastAccessed: z.date(),
+  mode: z.enum(['web-development', 'github', 'default']).optional(),
   capabilities: z.object({
     supportsRollback: z.boolean(),
     maxConcurrentCalls: z.number(),

@@ -17,6 +17,7 @@ import mcpHubInstance from '../../packages/api/mcp/mcphub.mjs';
 import chalk from 'chalk';
 import { pathTo, getPackageJson } from './utils.mjs';
 
+
 function clearScreen() {
   const repeatCount = process.stdout.rows - 2;
   const blank = repeatCount > 0 ? '\n'.repeat(repeatCount) : '';
@@ -56,7 +57,7 @@ const webSocketServer = new WsWebSocketServer({ server });
 webSocketServer.on('connection', wss.onConnection);
 
 // Serve the react-app for all other routes, handled by client-side routing
-app.get('*', (_req, res) => res.sendFile(INDEX_HTML));
+app.get('*', (_req: express.Request, res: express.Response) => res.sendFile(INDEX_HTML));
 
 console.log(chalk.green('Initialization complete'));
 
@@ -66,9 +67,35 @@ const url = `http://localhost:${port}`;
 // Initialize MCPHub and start servers
 (async () => {
   try {
-    // Initialize MCPHub (establish connections to MCP servers)
+    console.log('Starting initialization sequence...');
+    
+    // Initialize MCPHub first
+    console.log('Initializing MCPHub...');
     await mcpHubInstance.initialize();
-    console.log('MCPHub initialized successfully.');
+    console.log('MCPHub initialized successfully');
+    
+    // Import tool executor modules
+    const { initializeToolExecutor, getToolExecutor } = await import('../../packages/api/ai/tool-executor-singleton.mjs');
+    
+    // Initialize tool executor and wait for completion
+    console.log('Initializing tool executor...');
+    await initializeToolExecutor(mcpHubInstance);
+    
+    // Get tool executor instance
+    console.log('Getting tool executor instance...');
+    const toolExecutor = await getToolExecutor();
+    
+    // Initialize GitHub server tools
+    console.log('Initializing GitHub server tools...');
+    try {
+      await toolExecutor.initializeServerTools('github');
+      console.log('GitHub server tools initialized successfully');
+    } catch (error) {
+      console.error('Failed to initialize GitHub server tools:', error);
+      throw error;
+    }
+    
+    console.log('MCPHub and ToolExecutor initialized successfully.');
 
     // Log current server connections and capabilities
     logServerConnections();
@@ -79,7 +106,7 @@ const url = `http://localhost:${port}`;
     });
   } catch (error) {
     console.error('Failed to initialize MCPHub:', error);
-    process.exit(1); // Exit the application if MCPHub fails to initialize
+    process.exit(1);
   }
 })();
 

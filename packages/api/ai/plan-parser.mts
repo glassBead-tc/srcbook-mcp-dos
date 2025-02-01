@@ -3,7 +3,16 @@ import Path from 'node:path';
 import { type App as DBAppType } from '../db/schema.mjs';
 import { loadFile } from '../apps/disk.mjs';
 import { StreamingXMLParser, TagType } from './stream-xml-parser.mjs';
-import { ActionChunkType, DescriptionChunkType } from '@srcbook/shared';
+import { 
+  ActionChunkType, 
+  DescriptionChunkType, 
+  ActionDataType,
+  CommandActionChunkType,
+  McpActionChunkType,
+  FileActionChunkType,
+  ActionType,
+  CommandType
+} from '@srcbook/shared';
 
 // The ai proposes a plan that we expect to contain both files and commands
 // Here is an example of a plan:
@@ -43,33 +52,13 @@ import { ActionChunkType, DescriptionChunkType } from '@srcbook/shared';
  * </plan>
  */
 
-interface FileAction {
-  type: 'file';
-  dirname: string;
-  basename: string;
-  path: string;
-  modified: string;
-  original: string | null; // null if this is a new file. Consider using an enum for 'edit' | 'create' | 'delete' instead.
-  description: string;
-}
-
-type NpmInstallCommand = {
-  type: 'command';
-  command: 'npm install';
-  packages: string[];
-  description: string;
-};
-
-// Later we can add more commands. For now, we only support npm install
-type Command = NpmInstallCommand;
-
 export interface Plan {
   // The high level description of the plan
   // Will be shown to the user above the diff box.
   id: string;
   query: string;
   description: string;
-  actions: (FileAction | Command)[];
+  actions: ActionDataType[];
 }
 
 interface ParsedResult {
@@ -82,6 +71,11 @@ interface ParsedResult {
           file?: { '@_filename': string; '#text': string };
           commandType?: string;
           package?: string | string[];
+          use_mcp_tool?: {
+            server_name: string;
+            tool_name: string;
+            arguments: string;
+          };
         }[]
       | {
           '@_type': string;
@@ -89,6 +83,11 @@ interface ParsedResult {
           file?: { '@_filename': string; '#text': string };
           commandType?: string;
           package?: string | string[];
+          use_mcp_tool?: {
+            server_name: string;
+            tool_name: string;
+            arguments: string;
+          };
         };
   };
 }
@@ -131,7 +130,7 @@ export async function parsePlan(
           // If the file doesn't exist, it's likely that it's a new file.
         }
 
-        plan.actions.push({
+        const fileData: FileActionChunkType = {
           type: 'file',
           path: filePath,
           dirname: Path.dirname(filePath),
@@ -139,18 +138,30 @@ export async function parsePlan(
           modified: action.file['#text'],
           original: originalContent,
           description: action.description,
-        });
+        };
+        plan.actions.push(fileData);
+      } else if (action['@_type'] === 'mcp' && action.use_mcp_tool) {
+        const mcpTool = action.use_mcp_tool;
+        const mcpData: McpActionChunkType = {
+          type: 'mcp',
+          description: action.description,
+          server_name: mcpTool.server_name,
+          tool_name: mcpTool.tool_name,
+          arguments: JSON.parse(mcpTool.arguments)
+        };
+        plan.actions.push(mcpData);
       } else if (action['@_type'] === 'command' && action.commandType === 'npm install') {
         if (!action.package) {
           console.error('Invalid response: missing package tag');
           continue;
         }
-        plan.actions.push({
+        const commandData: CommandActionChunkType = {
           type: 'command',
           command: 'npm install',
           packages: Array.isArray(action.package) ? action.package : [action.package],
           description: action.description,
-        });
+        };
+        plan.actions.push(commandData);
       }
     }
 
@@ -164,7 +175,7 @@ export async function parsePlan(
 export function getPackagesToInstall(plan: Plan): string[] {
   return plan.actions
     .filter(
-      (action): action is NpmInstallCommand =>
+      (action): action is CommandActionChunkType =>
         action.type === 'command' && action.command === 'npm install',
     )
     .flatMap((action) => action.packages);
@@ -232,7 +243,7 @@ async function toStreamingChunk(
     case 'action': {
       const descriptionTag = tag.children.find((t) => t.name === 'description');
       const description = descriptionTag?.content ?? '';
-      const type = tag.attributes.type;
+      const type = tag.attributes.type as ActionType;
 
       if (type === 'file') {
         const fileTag = tag.children.find((t) => t.name === 'file')!;
@@ -247,7 +258,7 @@ async function toStreamingChunk(
           // If the file doesn't exist, it's likely that it's a new file.
         }
 
-        return {
+        const fileAction: ActionChunkType = {
           type: 'action',
           planId: planId,
           data: {
@@ -259,21 +270,43 @@ async function toStreamingChunk(
             modified: fileTag.content,
             original: originalContent,
           },
-        } as ActionChunkType;
+        };
+        return fileAction;
       } else if (type === 'command') {
         const commandTag = tag.children.find((t) => t.name === 'commandType')!;
         const packageTags = tag.children.filter((t) => t.name === 'package');
 
-        return {
+        const commandAction: ActionChunkType = {
           type: 'action',
           planId: planId,
           data: {
             type: 'command',
             description,
-            command: commandTag.content,
+            command: commandTag.content as CommandType,
             packages: packageTags.map((t) => t.content),
           },
-        } as ActionChunkType;
+        };
+        return commandAction;
+      } else if (type === 'mcp') {
+        const mcpToolTag = tag.children.find((t) => t.name === 'use_mcp_tool')!;
+        const serverNameTag = mcpToolTag.children.find((t) => t.name === 'server_name')!;
+        const toolNameTag = mcpToolTag.children.find((t) => t.name === 'tool_name')!;
+        const argumentsTag = mcpToolTag.children.find((t) => t.name === 'arguments')!;
+
+        const mcpData: McpActionChunkType = {
+          type: 'mcp',
+          description,
+          server_name: serverNameTag.content,
+          tool_name: toolNameTag.content,
+          arguments: JSON.parse(argumentsTag.content)
+        };
+
+        const mcpAction: ActionChunkType = {
+          type: 'action',
+          planId: planId,
+          data: mcpData
+        };
+        return mcpAction;
       } else {
         return null;
       }

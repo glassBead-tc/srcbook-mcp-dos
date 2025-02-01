@@ -14,9 +14,6 @@ import { LLMPromptContext, LLMPromptResult } from '../mcp/types/index.mjs';
 
 type Tool = McpTool;
 
-// Use our new server context type
-type ServerContext = ServerContextType;
-
 interface ServerStateManager extends EnhancedServerStateManager {
   getDefaultForTool(toolName: string, field: string): any;
   updateToolDefaults(toolName: string, defaults: Record<string, any>): void;
@@ -220,6 +217,8 @@ export class ToolExecutor {
   private serverContexts: Map<string, ServerContext>;
   private toolSchemas: Map<string, Map<string, Tool>>;
   private config: ToolExecutorConfig;
+  private initializedServers: Set<string> = new Set();
+  private inProgressCalls: Set<string> = new Set();
 
   constructor(
     mcpHub: MCPHub, 
@@ -245,7 +244,7 @@ export class ToolExecutor {
         this.serverContexts.set(serverName, { 
           type: 'default',  
           config,
-          lastAccessed: new Date()
+          lastAccessed: new Date(),
         });
       });
     }
@@ -260,11 +259,9 @@ export class ToolExecutor {
       const toolMap = new Map<string, Tool>();
       
       tools.forEach(rawTool => {
-        // Parse the raw tool through our schema to ensure type safety
         const tool = McpToolSchema.parse(rawTool);
         toolMap.set(tool.name, tool);
         
-        // Mark potentially dangerous tools
         if (this.isDangerousTool(tool)) {
           const context: ServerContextType = this.serverContexts.get(serverName) || {
             type: 'default',
@@ -274,7 +271,7 @@ export class ToolExecutor {
               maxConcurrentCalls: 1,
               supportedOperations: []
             },
-            lastAccessed: new Date()
+            lastAccessed: new Date(),
           };
           context.capabilities = context.capabilities || {
               supportsRollback: false,
@@ -290,6 +287,8 @@ export class ToolExecutor {
       });
 
       this.toolSchemas.set(serverName, toolMap);
+      this.initializedServers.add(serverName);
+      console.log(`Server ${serverName} tools initialized successfully`);
     } catch (error) {
       console.error(`Failed to initialize tools for server ${serverName}:`, error);
       throw error;
@@ -301,122 +300,7 @@ export class ToolExecutor {
    */
   async executeTool<T = any>(params: ToolExecutionParams): Promise<ToolExecutionResult<T>> {
     const { serverName, toolName, arguments: toolArgs } = params;
-    let currentArgs = { ...toolArgs };
-    let attempts = 0;
-    let operationState: OperationState | undefined;
-
-    while (attempts < this.config.maxRetries!) {
-      try {
-        const tool = this.getToolSchema(serverName, toolName);
-        if (!tool) {
-          return {
-            success: false,
-            error: `Tool not found: ${serverName}/${toolName}`
-          };
-        }
-
-        // For dangerous operations, capture state before execution
-        if (this.isDangerousTool(tool)) {
-          operationState = await this.captureState(serverName, toolName, currentArgs);
-        }
-
-        // Check if this is a dangerous tool requiring confirmation
-        if (this.requiresConfirmation(serverName, toolName)) {
-          const confirmed = await this.getUserConfirmation(serverName, toolName, currentArgs);
-          if (!confirmed) {
-            return {
-              success: false,
-              error: 'User denied dangerous operation'
-            };
-          }
-        }
-
-        // Validate and inject missing fields
-        const { valid, enrichedArgs, missingFields, error } = await this.validateAndEnrichArguments(
-          serverName,
-          tool,
-          currentArgs
-        );
-
-        if (!valid) {
-          if (error) {
-            return {
-              success: false,
-              error
-            };
-          }
-
-          if (this.config.llmEnabled && missingFields) {
-            // Try to get missing fields from LLM
-            const promptContext: LLMPromptContext = {
-              serverName,
-              toolName,
-              missingFields: missingFields.map((field: string) => ({
-                name: field,
-                type: tool.inputSchema.properties[field]?.type || 'unknown',
-                description: tool.inputSchema.properties[field]?.description
-              })),
-              currentArgs,
-              attemptCount: attempts
-            };
-
-            const llmResult = await this.promptLLM(promptContext);
-            
-            if (llmResult.shouldPromptUser) {
-              return {
-                success: false,
-                error: llmResult.userPrompt || 'User input required for missing fields',
-                missingFields
-              };
-            }
-
-            // Merge LLM provided values with current args
-            currentArgs = {
-              ...currentArgs,
-              ...llmResult.providedValues
-            };
-            
-            attempts++;
-            continue;
-          }
-
-          return {
-            success: false,
-            missingFields,
-            error: `Missing required fields: ${missingFields?.join(', ')}`
-          };
-        }
-
-        // Execute the tool
-        const result = await this.mcpHub.callTool(serverName, toolName, enrichedArgs!);
-
-        return {
-          success: true,
-          data: result as T,
-        };
-
-      } catch (error) {
-        // If operation failed and we have state, attempt rollback
-        if (operationState) {
-          const rollbackResult = await this.rollback(operationState);
-          return {
-            success: false,
-            error: error instanceof Error ? error.message : 'Unknown error',
-            rollbackError: rollbackResult.success ? undefined : rollbackResult.error
-          };
-        }
-
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : 'Unknown error'
-        };
-      }
-    }
-
-    return {
-      success: false,
-      error: `Failed after ${attempts} attempts`
-    };
+    return this.mcpHub.callTool(serverName, toolName, toolArgs);
   }
 
   /**
@@ -761,7 +645,7 @@ Remember to consider:
    * Get tool schema
    */
   private getToolSchema(serverName: string, toolName: string): Tool | undefined {
-    return this.toolSchemas.get(serverName)?.get(toolName);
+    return this.toolSchemas.get(serverName)?.get(toolName.trim());
   }
 
   /**
@@ -823,14 +707,14 @@ Remember to consider:
     return 'none';
   }
 
-  private getDangerousOperationType(operation: string): string | undefined {
-    for (const [type, category] of Object.entries(DANGEROUS_CATEGORIES)) {
-      if (category.operations.some(op => operation.toLowerCase().includes(op))) {
-        return `${type}: ${category.description}`;
-      }
-    }
-    return undefined;
-  }
+  // private getDangerousOperationType(operation: string): string | undefined {
+  //   for (const [type, category] of Object.entries(DANGEROUS_CATEGORIES)) {
+  //     if (category.operations.some(op => operation.toLowerCase().includes(op))) {
+  //       return `${type}: ${category.description}`;
+  //     }
+  //   }
+  //   return undefined;
+  // }
 
   /**
    * Get user confirmation for dangerous operations
@@ -861,7 +745,7 @@ Remember to consider:
         maxConcurrentCalls: 1,
         supportedOperations: []
       },
-      lastAccessed: new Date()
+      lastAccessed: new Date(),
     };
     
     this.serverContexts.set(serverName, {
@@ -918,6 +802,10 @@ Remember to consider:
     missingFields?: string[];
     error?: string;
   }> {
+
+    
+
+
     const enrichedArgs = { ...args };
     const missingFields: string[] = [];
 
@@ -942,4 +830,15 @@ Remember to consider:
       missingFields: missingFields.length > 0 ? missingFields : undefined
     };
   }
+}
+
+export interface ServerContext {
+  type: string;
+  config: Record<string, any>;
+  capabilities?: {
+    supportsRollback: boolean;
+    maxConcurrentCalls: number;
+    supportedOperations: string[];
+  };
+  lastAccessed: Date;
 }

@@ -16,8 +16,7 @@ import { buildProjectXml, type FileContent } from '../ai/app-parser.mjs';
 import { logAppGeneration } from './logger.mjs';
 import mcpHubInstance from '../mcp/mcphub.mjs';
 import { SYSTEM_PROMPT } from "../prompts/system-scratch.mjs";
-import { McpToolCallResponse } from '../mcp/types/index.mjs';
-import { ToolExecutor } from './tool-executor.mjs';
+import { getToolExecutor } from './tool-executor-singleton.mjs';
 
 console.log('MCPHub instance:', mcpHubInstance);
 
@@ -261,17 +260,23 @@ export async function generateApp(
   files: FileContent[],
   query: string,
 ): Promise<string> {
+  console.log('Starting generateApp with query:', query);
   await waitForMcpInit();
 
-  const systemPrompt = await SYSTEM_PROMPT(mcpHubInstance);
-  console.log('System prompt generated successfully');
+  const systemPrompt = await SYSTEM_PROMPT(mcpHubInstance, projectId);
+  console.log('System prompt:', systemPrompt);
+  
+  const userPrompt = makeAppCreateUserPrompt(projectId, files, query);
+  console.log('User prompt:', userPrompt);
   
   const model = await getModel();
   const llmResult = await generateText({
     model,
     system: systemPrompt,
-    prompt: makeAppCreateUserPrompt(projectId, files, query),
+    prompt: userPrompt,
   });
+
+  console.log('Raw LLM response before any processing:', llmResult.text);
 
   // Add detailed logging of the LLM response
   console.log('Raw LLM response:', llmResult.text);
@@ -304,10 +309,14 @@ export async function streamEditApp(
   appId: string,
   planId: string,
 ) {
-  await waitForMcpInit();
+  // Wait for BOTH MCP and initial compilation
+  await Promise.all([
+    waitForMcpInit(),
+    new Promise(resolve => setTimeout(resolve, 2000)) // Give compilation time to finish
+  ]);
 
   const model = await getModel();
-  const systemPrompt = await SYSTEM_PROMPT(mcpHubInstance);
+  const systemPrompt = await SYSTEM_PROMPT(mcpHubInstance, projectId);
   const userPrompt = makeAppEditorUserPrompt(projectId, files, query);
 
   let response = '';
@@ -316,45 +325,33 @@ export async function streamEditApp(
     tool_name: string | undefined;
     arguments: Record<string, unknown>;
   }> = [];
+  let planExecuted = false;
 
   const result = await streamText({
     model,
     system: systemPrompt,
     prompt: userPrompt,
-    onChunk: (chunk) => {
+    onChunk: async (chunk) => {
+      if (planExecuted) return;
+      
       if (chunk.chunk.type === 'text-delta') {
         response += chunk.chunk.textDelta;
         
-        // Try to parse tool usages as they come in
-        try {
+        if (!planExecuted && response.includes('</plan>')) {
+          planExecuted = true;
           const planStart = response.indexOf('<plan>');
           if (planStart !== -1) {
             const cleanedResponse = response.slice(planStart);
             toolUsages = parseOutToolTags(cleanedResponse);
+            await executeToolCalls(toolUsages);
           }
-        } catch (error) {
-          // Ignore parsing errors during streaming as the XML might be incomplete
-          console.debug('Parsing error during streaming:', error);
         }
       }
-    },
-    onFinish: async () => {
-      if (process.env.SRCBOOK_DISABLE_ANALYTICS !== 'true') {
-        logAppGeneration({
-          appId,
-          planId,
-          llm_request: { model, system: systemPrompt, prompt: userPrompt },
-          llm_response: response,
-        });
-      }
-
-      // Process tool calls after streaming is complete
-      await executeToolCalls(toolUsages);
-    },
+    }
   });
 
   return result.textStream;
-} 
+}
 
 /**
  * Helper function to wait for MCP initialization
@@ -365,12 +362,13 @@ async function waitForMcpInit() {
   }
 }
 
-const toolExecutor = new ToolExecutor(mcpHubInstance, {
-  github: {
-    push_files: ['owner', 'branch'],
-    create_repository: ['name', 'description'],
-  }
-});
+// Add a simple interface for the tool execution result
+interface ToolResult {
+  success: boolean;
+  data?: unknown;
+  error?: string;
+  missingFields?: string[];
+}
 
 async function executeToolCalls(
   toolUsages: Array<{
@@ -379,75 +377,23 @@ async function executeToolCalls(
     arguments: Record<string, unknown>;
   }>,
 ): Promise<any> {
-  let lastToolResult: any;
-  
-  for (const [index, usage] of toolUsages.entries()) {
+  for (const usage of toolUsages) {
     const { server_name, tool_name, arguments: toolArgs } = usage;
-    console.log(`Executing step ${index + 1}/${toolUsages.length}: ${server_name}/${tool_name}`);
+    
+    // Get the executor ONCE before the loop
+    const toolExecutor = await getToolExecutor();
+    
+    // Then use it for all tools
+    const result = await toolExecutor.executeTool({
+      serverName: server_name!,
+      toolName: tool_name!,
+      arguments: toolArgs
+    });
 
-    try {
-      const finalArgs = {
-        ...toolArgs,
-        ...(index > 0 && toolArgs.requiresPreviousResult ? { previousResult: lastToolResult } : {})
-      };
-
-      const result = await toolExecutor.executeTool({
-        serverName: server_name!,
-        toolName: tool_name!,
-        arguments: finalArgs
-      });
-
-      if (!result.success) {
-        // If execution failed due to missing fields, throw a specific error
-        if (result.missingFields?.length) {
-          throw new Error(
-            `Tool execution failed: Missing required fields for ${server_name}/${tool_name}: ${result.missingFields.join(', ')}`
-          );
-        }
-        // Otherwise throw the general error
-        throw new Error(result.error);
-      }
-
-      lastToolResult = result.data;
-      console.log(`Tool result [${server_name}/${tool_name}]:`, lastToolResult);
-
-      // Add delay between steps if needed
-      if (index < toolUsages.length - 1) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
-    } catch (error) {
-      console.error(`Failed at step ${index + 1}/${toolUsages.length}:`, error);
-      throw error;
+    if (!result.success) {
+      throw new Error(`Tool execution failed: ${result.error || 'Unknown error'}`);
     }
   }
-
-  return lastToolResult;
-}
-
-/**
- * Generic verification function that relies on standard tool response format
- */
-async function verifyToolSuccess(
-  toolResult: McpToolCallResponse,
-  context: { server_name: string, tool_name: string }
-): Promise<{ success: boolean; message: string }> {
-  if (!toolResult) {
-    return { 
-      success: false, 
-      message: `Tool ${context.server_name}/${context.tool_name} returned no result` 
-    };
-  }
-
-  // Use the isError field from our schema
-  const success = !toolResult.isError;
-  
-  // Extract message from content if available
-  const message = toolResult.content
-    .filter(item => item.type === 'text')
-    .map(item => (item as { text: string }).text)
-    .join('\n') || `${context.server_name}/${context.tool_name} execution completed`;
-
-  return { success, message };
 }
 
 /**
@@ -464,12 +410,17 @@ function parseOutToolTags(text: string): Array<{
   const matches = Array.from(text.matchAll(toolPattern));
   console.log('Found tool matches:', matches.length);
   
-  return matches.map(match => {
+  const tools = matches.map(match => {
     const [_, server_name, tool_name, argsText] = match;
     
     let parsedArgs: Record<string, unknown> = {};
     try {
       parsedArgs = JSON.parse(argsText!.trim());
+      console.log('Parsed tool arguments:', {
+        server_name,
+        tool_name,
+        arguments: parsedArgs
+      });
     } catch (err) {
       console.warn("Failed to parse arguments from <use_mcp_tool>", err);
       console.log("Raw args text:", argsText);
@@ -481,4 +432,6 @@ function parseOutToolTags(text: string): Array<{
       arguments: parsedArgs,
     };
   });
+  
+  return tools;
 }
