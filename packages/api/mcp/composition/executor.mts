@@ -15,15 +15,21 @@ import {
 
 export class CompositionExecutor {
   private static instance: CompositionExecutor;
-  private hub: MCPHub;
+  private hub?: MCPHub;
   private tools: Map<string, ComposedTool>;
   private activeExecutions: Map<string, ExecutionState>;
 
   private constructor() {
     console.log('Creating new CompositionExecutor instance.');
-    this.hub = MCPHub.getInstance();
     this.tools = new Map();
     this.activeExecutions = new Map();
+  }
+
+  private getHub(): MCPHub {
+    if (!this.hub) {
+      this.hub = MCPHub.getInstance();
+    }
+    return this.hub;
   }
 
   public static getInstance(): CompositionExecutor {
@@ -108,7 +114,7 @@ export class CompositionExecutor {
           const resolvedParams = await this.resolveParameters(step.input, state);
 
           // Execute step
-          const result = await this.hub.callTool(
+          const result = await this.getHub().callTool(
             step.server,
             step.tool,
             resolvedParams
@@ -185,7 +191,7 @@ export class CompositionExecutor {
 
     // Validate server and tool existence
     for (const step of tool.steps) {
-      const serverTools = this.hub.getToolsByServer(step.server);
+      const serverTools = this.getHub().getToolsByServer(step.server);
       const tool = serverTools.find(t => t.name === step.tool);
       if (!tool) {
         throw {
@@ -330,7 +336,7 @@ export class CompositionExecutor {
     try {
       // Execute rollback operations in reverse order
       for (const operation of state.rollbackStack.reverse()) {
-        await this.hub.callTool(
+        await this.getHub().callTool(
           operation.server,
           operation.tool,
           operation.params

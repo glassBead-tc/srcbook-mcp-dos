@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate, NavLink, Link } from 'react-router-dom';
 import {
   PlusIcon,
@@ -11,8 +11,9 @@ import {
 } from 'lucide-react';
 import { TitleCellType } from '@srcbook/shared';
 
-import { SessionType } from '@/types';
+import { SessionType, MCPTool } from '@/types';
 import { SrcbookLogo } from '@/components/logos';
+import { MCPToolsCounter } from '@/components/mcp-tools-counter';
 import { Button } from '@srcbook/components/src/components/ui/button';
 import GenerateSrcbookModal from '@/components/generate-srcbook-modal';
 import DeleteSrcbookModal from '@/components/delete-srcbook-dialog';
@@ -66,6 +67,28 @@ export function SessionNavbar(props: SessionNavbarProps) {
   const [showImportSrcbookModal, setShowImportSrcbookModal] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
   const [showSave, setShowSave] = useState(false);
+  const [tools, setTools] = useState<MCPTool[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    const fetchTools = async () => {
+      try {
+        setIsLoading(true);
+        // Add a longer delay to ensure MCPHub has time to initialize and connect to all servers
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        const response = await fetch(`${window.SRCBOOK_CONFIG.api.origin}/api/mcp/tools`);
+        const data = await response.json();
+        if (!data.error && Array.isArray(data.result)) {
+          setTools(data.result);
+        }
+      } catch (error) {
+        console.error('Failed to fetch MCP tools:', error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    fetchTools();
+  }, []);
 
   const srcbooks = props.srcbooks.sort((a, b) => b.openedAt - a.openedAt).slice(0, 6);
 
@@ -104,7 +127,8 @@ export function SessionNavbar(props: SessionNavbarProps) {
 
       <header className="h-12 w-full flex items-center justify-between fixed bg-background z-50 border-b border-border text-sm font-medium">
         <nav className="flex items-center justify-between px-4 flex-1">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-4">
+            <MCPToolsCounter tools={tools} isLoading={isLoading} />
             <NavLink to="/">
               <h1 className="font-mono font-bold flex items-center space-x-[10px] pr-1">
                 <SrcbookLogo size={20} />
@@ -272,10 +296,34 @@ function SocialDiscordIcon() {
 }
 
 export function Navbar() {
+  const [tools, setTools] = useState<MCPTool[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    const fetchTools = async () => {
+      try {
+        setIsLoading(true);
+        // Add a longer delay to ensure MCPHub has time to initialize and connect to all servers
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        const response = await fetch(`${window.SRCBOOK_CONFIG.api.origin}/api/mcp/tools`);
+        const data = await response.json();
+        if (!data.error && Array.isArray(data.result)) {
+          setTools(data.result);
+        }
+      } catch (error) {
+        console.error('Failed to fetch MCP tools:', error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    fetchTools();
+  }, []);
+
   return (
     <header className="h-12 w-full flex items-center justify-between fixed bg-background z-50 border-b border-border text-sm ">
       <nav className="flex items-center justify-between px-4 flex-1">
         <div className="flex items-center gap-6">
+          <MCPToolsCounter tools={tools} isLoading={isLoading} />
           <NavLink to="/">
             <h1 className="font-mono font-bold flex items-center space-x-[10px]">
               <SrcbookLogo size={20} />

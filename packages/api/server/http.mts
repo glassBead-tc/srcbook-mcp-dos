@@ -71,6 +71,10 @@ const app: Application = express();
 const router = express.Router();
 
 router.use(express.json());
+router.use(cors({
+  origin: process.env.NODE_ENV === 'development' ? 'http://localhost:5173' : undefined,
+  credentials: true
+}));
 
 router.options('/file', cors());
 
@@ -799,6 +803,35 @@ router.post('/apps/:id/history', cors(), async (req, res) => {
   const { messages } = req.body;
   await appendToHistory(id, messages);
   return res.json({ data: { success: true } });
+});
+
+router.options('/mcp/tools', cors());
+router.get('/mcp/tools', cors(), async (_req, res) => {
+  try {
+    console.log('Received request for /mcp/tools');
+    const mcpHub = mcpHubInstance;
+    console.log('MCPHub initialized:', mcpHub.isInitialized);
+    
+    if (!mcpHub.isInitialized) {
+      console.log('MCPHub not initialized, initializing now...');
+      await mcpHub.initialize();
+      console.log('MCPHub initialization complete');
+    }
+    
+    const tools = mcpHub.getAllTools().map(tool => ({
+      name: tool.name,
+      description: tool.description || '',
+      server: tool.serverName
+    }));
+    console.log('Found tools:', tools.length);
+    return res.json({ error: false, result: tools });
+  } catch (error) {
+    console.error('Failed to get MCP tools:', error);
+    return res.status(500).json({ 
+      error: true, 
+      message: error instanceof Error ? error.message : String(error)
+    });
+  }
 });
 
 router.options('/mcp/tool', cors());

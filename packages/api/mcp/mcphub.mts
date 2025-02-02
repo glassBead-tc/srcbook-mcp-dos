@@ -120,6 +120,17 @@ export class MCPHub {
       );
     } finally {
       this.initialized = true;
+      
+      // Initialize tools
+      if (!this.toolsInitialized) {
+        try {
+          await this.initializeTools();
+          console.log('Tools initialized successfully');
+        } catch (error) {
+          console.error('Error initializing tools:', error);
+        }
+      }
+
       // Initialize composed tools
       if (!this.composedToolsInitialized) {
         try {
@@ -131,7 +142,12 @@ export class MCPHub {
         }
       }
 
-      console.log('MCPHub initialization complete.');
+      console.log('MCPHub initialization complete with:', {
+        toolsInitialized: this.toolsInitialized,
+        composedToolsInitialized: this.composedToolsInitialized,
+        numberOfServers: this.connections.size,
+        numberOfTools: this.allTools.size
+      });
     }
   }
 
@@ -664,7 +680,27 @@ export class MCPHub {
   }
 
   public getAllTools(): Tool[] {
-    return Array.from(this.allTools.values()).flat();
+    if (!this.initialized) {
+      console.warn('getAllTools called before MCPHub initialization, initializing now...');
+      this.initialize().catch(error => {
+        console.error('Failed to initialize MCPHub:', error);
+      });
+      return [];
+    }
+
+    if (!this.toolsInitialized) {
+      console.warn('getAllTools called before tools initialization, initializing tools...');
+      this.initializeTools().catch(error => {
+        console.error('Failed to initialize tools:', error);
+      });
+      return [];
+    }
+
+    console.log('getAllTools called, toolsInitialized:', this.toolsInitialized);
+    console.log('Number of servers with tools:', this.allTools.size);
+    const tools = Array.from(this.allTools.values()).flat();
+    console.log('Total number of tools:', tools.length);
+    return tools;
   }
 
   public getToolsByServer(serverName: string): Tool[] {

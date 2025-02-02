@@ -21,6 +21,12 @@ export type SettingsType = {
   subscriptionEmail?: string | null;
 };
 
+export type MCPTool = {
+  name: string;
+  description: string;
+  server: string;
+};
+
 export type SessionType = {
   id: string;
   cells: CellType[];

@@ -20,10 +20,10 @@
       })(localStorage.getItem('sb:theme'));
     </script>
     <script type="text/javascript">
-      globalThis.SRCBOOK_CONFIG = {
+      window.SRCBOOK_CONFIG = {
         api: {
-          host: %VITE_SRCBOOK_API_HOST%,
-          origin: %VITE_SRCBOOK_API_ORIGIN%,
+          host: localStorage.getItem('VITE_SRCBOOK_API_HOST') || 'localhost:2150',
+          origin: localStorage.getItem('VITE_SRCBOOK_API_ORIGIN') || 'http://localhost:2150',
         },
       };
     </script>
