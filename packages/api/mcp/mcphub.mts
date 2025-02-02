@@ -1,5 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { compositionExecutor, loadComposedTools } from './composition/index.mjs';
 import {
   ListToolsResultSchema,
   ListResourcesResultSchema,
@@ -66,6 +67,7 @@ export class MCPHub {
   private config!: McpConfig;
   private allTools: Map<string, Tool[]> = new Map();
   private toolsInitialized = false;
+  private composedToolsInitialized = false;
   private connectionRetryAttempts: Map<string, number> = new Map();
   private readonly MAX_RETRY_ATTEMPTS = 3;
   private readonly RETRY_DELAY = 1000; // 1 second
@@ -118,8 +120,37 @@ export class MCPHub {
       );
     } finally {
       this.initialized = true;
+      // Initialize composed tools
+      if (!this.composedToolsInitialized) {
+        try {
+          await loadComposedTools();
+          this.composedToolsInitialized = true;
+          console.log('Composed tools initialized.');
+        } catch (error) {
+          console.error('Error initializing composed tools:', error);
+        }
+      }
+
       console.log('MCPHub initialization complete.');
     }
+  }
+
+  /**
+   * Execute a composed tool
+   */
+  async executeComposedTool(
+    toolName: string,
+    params: Record<string, any>
+  ): Promise<any> {
+    if (!this.initialized) {
+      throw new Error('MCPHub not initialized');
+    }
+
+    if (!this.composedToolsInitialized) {
+      throw new Error('Composed tools not initialized');
+    }
+
+    return compositionExecutor.executeTool(toolName, params);
   }
 
   private async ensureConnection(name: string): Promise<void> {

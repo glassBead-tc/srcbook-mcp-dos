@@ -1,0 +1,217 @@
+{
+  "tools": [
+    {
+      "name": "create_github_project",
+      "description": "Create a new GitHub project with initial files and configuration",
+      "version": "1.0.0",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "private": { "type": "boolean" },
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": { "type": "string" },
+                "content": { "type": "string" }
+              },
+              "required": ["path", "content"]
+            }
+          }
+        },
+        "required": ["name", "description"]
+      },
+      "steps": [
+        {
+          "name": "create_repository",
+          "server": "github",
+          "tool": "create_repository",
+          "input": {
+            "name": {
+              "type": "reference",
+              "source": {
+                "type": "param",
+                "path": "name"
+              }
+            },
+            "description": {
+              "type": "reference",
+              "source": {
+                "type": "param",
+                "path": "description"
+              }
+            },
+            "private": {
+              "type": "reference",
+              "source": {
+                "type": "param",
+                "path": "private"
+              }
+            },
+            "autoInit": true
+          },
+          "output": "repository"
+        },
+        {
+          "name": "create_files",
+          "server": "github",
+          "tool": "push_files",
+          "input": {
+            "owner": "self",
+            "repo": {
+              "type": "reference",
+              "source": {
+                "type": "param",
+                "path": "name"
+              }
+            },
+            "branch": "main",
+            "files": {
+              "type": "reference",
+              "source": {
+                "type": "param",
+                "path": "files"
+              }
+            },
+            "message": "Initial project setup"
+          },
+          "condition": {
+            "type": "success",
+            "stepName": "create_repository"
+          }
+        }
+      ]
+    },
+    {
+      "name": "backup_repository",
+      "description": "Create a backup of a GitHub repository including all files and issues",
+      "version": "1.0.0",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "owner": { "type": "string" },
+          "repo": { "type": "string" },
+          "backupDir": { "type": "string" }
+        },
+        "required": ["owner", "repo", "backupDir"]
+      },
+      "steps": [
+        {
+          "name": "get_files",
+          "server": "github",
+          "tool": "get_file_contents",
+          "input": {
+            "owner": {
+              "type": "reference",
+              "source": {
+                "type": "param",
+                "path": "owner"
+              }
+            },
+            "repo": {
+              "type": "reference",
+              "source": {
+                "type": "param",
+                "path": "repo"
+              }
+            },
+            "path": ""
+          },
+          "output": "files"
+        },
+        {
+          "name": "get_issues",
+          "server": "github",
+          "tool": "list_issues",
+          "input": {
+            "owner": {
+              "type": "reference",
+              "source": {
+                "type": "param",
+                "path": "owner"
+              }
+            },
+            "repo": {
+              "type": "reference",
+              "source": {
+                "type": "param",
+                "path": "repo"
+              }
+            },
+            "state": "all"
+          },
+          "output": "issues"
+        },
+        {
+          "name": "create_backup_dir",
+          "server": "filesystem",
+          "tool": "create_directory",
+          "input": {
+            "path": {
+              "type": "reference",
+              "source": {
+                "type": "param",
+                "path": "backupDir"
+              }
+            }
+          }
+        },
+        {
+          "name": "save_files",
+          "server": "filesystem",
+          "tool": "write_file",
+          "input": {
+            "path": {
+              "type": "reference",
+              "source": {
+                "type": "param",
+                "path": "backupDir"
+              }
+            },
+            "content": {
+              "type": "reference",
+              "source": {
+                "type": "output",
+                "stepName": "get_files",
+                "path": "files"
+              }
+            }
+          },
+          "condition": {
+            "type": "success",
+            "stepName": "create_backup_dir"
+          }
+        },
+        {
+          "name": "save_issues",
+          "server": "filesystem",
+          "tool": "write_file",
+          "input": {
+            "path": {
+              "type": "reference",
+              "source": {
+                "type": "param",
+                "path": "backupDir"
+              }
+            },
+            "content": {
+              "type": "reference",
+              "source": {
+                "type": "output",
+                "stepName": "get_issues",
+                "path": "issues"
+              }
+            }
+          },
+          "condition": {
+            "type": "success",
+            "stepName": "create_backup_dir"
+          }
+        }
+      ]
+    }
+  ]
+}
